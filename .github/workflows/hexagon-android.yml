@@ -1,0 +1,48 @@
+name: Hexagon Android artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master, main]
+    paths:
+      - '.github/workflows/hexagon-android.yml'
+      - 'scripts/ci-build-hexagon.sh'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hexagon-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build FastRPC and dspqueue (Android arm64)
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/snapdragon-toolchain/arm64-android:v0.8
+    timeout-minutes: 180
+    steps:
+      - name: Checkout app workspace
+        uses: actions/checkout@v4
+
+      - name: Install host build utilities
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git cmake ninja-build python3 ca-certificates
+
+      - name: Build both Hexagon variants
+        shell: bash
+        env:
+          GGML_HEXAGON_REF: a5e6be5e032eaf22e6a1154e2b6ab34a76a13a8d
+          CMAKE_GENERATOR: Ninja
+          CMAKE_BUILD_PARALLEL_LEVEL: '2'
+        run: bash scripts/ci-build-hexagon.sh
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemma4-hexagon-android-arm64-${{ github.sha }}
+          path: artifacts/hexagon-android-arm64/
+          if-no-files-found: error
+          retention-days: 14
