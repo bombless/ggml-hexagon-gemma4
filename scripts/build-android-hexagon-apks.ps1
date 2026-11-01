@@ -1,7 +1,8 @@
 param(
     [string]$Upstream = "D:\mcp-agent-workspace\ggml-hexagon",
     [string]$SdkRoot = $env:HEXAGON_SDK_ROOT,
-    [string]$Output = "artifacts\apk"
+    [string]$Output = "artifacts\apk",
+    [ValidateSet("all", "fastrpc-mempool", "dspqueue")][string]$OnlyBackend = "all"
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,10 +34,19 @@ Write-Host "Using bundled Hexagon Tools: $ToolsRoot"
 
 $OutputRoot = Join-Path $Repo $Output
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
+function Get-Sha256Hex([string]$Path) {
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try { return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '') }
+        finally { $sha.Dispose() }
+    } finally { $stream.Dispose() }
+}
 $Variants = @(
     @{ Name = "fastrpc-mempool"; Backend = "fastrpc-mempool" },
     @{ Name = "dspqueue"; Backend = "dspqueue" }
 )
+if ($OnlyBackend -ne "all") { $Variants = @($Variants | Where-Object { $_.Name -eq $OnlyBackend }) }
 
 Push-Location $Repo
 try {
@@ -68,12 +78,15 @@ try {
         if ($Variant.Name -eq "fastrpc-mempool" -and $Listing -notcontains "assets/hexagon/ap/ggml-hexagon.cfg") {
             throw "FastRPC APK lacks assets/hexagon/ap/ggml-hexagon.cfg"
         }
+        if ($Variant.Name -eq "dspqueue" -and $Listing -contains "assets/hexagon/ap/ggml-hexagon.cfg") {
+            throw "dspqueue APK contains a stale FastRPC-only ggml-hexagon.cfg asset"
+        }
         Copy-Item $Apk (Join-Path $OutputRoot "gemma4-$($Variant.Name)-debug.apk") -Force
-        Get-FileHash (Join-Path $OutputRoot "gemma4-$($Variant.Name)-debug.apk") -Algorithm SHA256 |
-            Format-List | Out-Host
+        $Artifact = Join-Path $OutputRoot "gemma4-$($Variant.Name)-debug.apk"
+        Write-Host "SHA256 $Artifact $(Get-Sha256Hex $Artifact)"
     }
 } finally {
     Pop-Location
 }
 
-Write-Host "Both transport APKs passed package-content checks: $OutputRoot"
+Write-Host "Selected transport APK package-content checks passed: $OutputRoot"

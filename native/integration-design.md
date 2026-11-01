@@ -1,6 +1,6 @@
 # ggml-hexagon Android integration design
 
-Status: JNI CPU path and compile-time Hexagon backend registration/device selection are implemented; licensed Hexagon build and target-device acceptance pending.
+Status: GGUF JNI/chat integration and compile-time Hexagon registration/device selection are implemented; both licensed FastRPC+mempool and dspqueue APK variants have passed host build/package checks; target-device acceptance pending.
 
 ## Pinned inputs and verified API
 
@@ -53,4 +53,4 @@ For Android JNI APK builds, `fastrpc-mempool` depends on the pinned `htp-mempool
 
 ## Current blockers
 
-The optional JNI/CMake registration path is implemented, but the licensed SDK build has not been run in this workspace; no target Gemma 4 E2B-it GGUF Q4_0 file/hash is provisioned; and no ggml-hexagon inference or HTP execution has been run on the RMX3800. The app's existing default engine remains ONNX Runtime/QNN.
+The optional JNI/CMake path and both licensed transport APK builds are implemented and have passed host package checks. The app's default engine remains ONNX Runtime/QNN. No target Gemma 4 E2B-it GGUF Q4_0 file/hash is provisioned in this workspace, and no ggml-hexagon inference, runtime loader acceptance, or HTP execution has been run on the RMX3800.

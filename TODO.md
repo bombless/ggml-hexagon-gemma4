@@ -10,11 +10,11 @@
 ## 0. Ground rules and workspace map
 
 - [x] Read this file and the current README before making changes.
-- [x] Keep the upstream checkout `D:\mcp-agent-workspace\ggml-hexagon` untouched. Its pinned baseline is
-  `a5e6be5e032eaf22e6a1154e2b6ab34a76a13a8d` (branch `self-build-jz`).
+- [x] Keep the upstream checkout `D:\mcp-agent-workspace\ggml-hexagon` pinned at
+  `a5e6be5e032eaf22e6a1154e2b6ab34a76a13a8d` (branch `self-build-jz`). Its working tree currently has one intentional, uncommitted Windows Ninja-propagation patch; see the 2026-11-02 progress log.
 - [x] Keep the original Android app checkout `D:\mcp-agent-workspace\gemma-android-app` untouched.
   It contains uncommitted/local data and must be treated as a read-only source for migration.
-- [ ] Work only in `D:\mcp-agent-workspace\ggml-hexagon-gemma4` unless explicitly agreed otherwise.
+- [x] Keep application/repository work in `D:\mcp-agent-workspace\ggml-hexagon-gemma4`; the pinned upstream checkout has one documented, uncommitted local CMake patch required for Windows Ninja propagation (see 2026-11-02 progress log).
 - [ ] Do not use the old `ggml-hexagon-bench` checkout.
 - [ ] Do not commit model weights, tokenizer/model binaries, API tokens, credentials, logs containing
   private data, build outputs, or Qualcomm proprietary SDK/toolchain files.
@@ -60,9 +60,9 @@
 - [ ] Link the Android-side shared libraries for the selected backend and package them in the APK
   or deploy them through a clearly documented development workflow.
 - [x] Define compile-time backend identity and runtime HTP registry/device selection (FastRPC+mempool vs dspqueue); JNI rejects an APK/request identity mismatch.
-- [ ] Implement native initialization, model loading, prompt submission, token streaming, cancel,
-  shutdown, and error propagation.
-- [ ] Add JNI thread/lifecycle safety and avoid blocking the Android UI thread.
+- [x] Implement JNI model/context/sampler initialization, GGUF chat-template prompt formatting,
+  token streaming, cancellation, error callbacks, KV reset between turns, and shutdown.
+- [x] Add JNI session lifecycle ownership and dispatch inference on `Dispatchers.IO`.
 - [ ] Add a CPU fallback or a clear diagnostic if Hexagon initialization is unavailable.
 - [ ] Verify ABI dependencies with `readelf`/Android tooling and inspect unresolved symbols.
 
@@ -70,15 +70,14 @@
 
 - [x] Keep the upstream pin explicit and reproducible (build script verifies the checked-out HEAD equals the pinned commit).
 - [ ] Document the licensed Qualcomm Hexagon SDK 6.7.0.0 / Hexagon Tools 21.0.04 prerequisites
-  and setup steps. Never commit or redistribute SDK files unless the license explicitly permits it.
-- [ ] Preserve the CI fix that supplies `PREBUILT_LIB_DIR` to CMake; validate the directory before
-  configuration.
-- [ ] Build both configurations:
-  - [ ] FastRPC + mempool (`GGML_HEXAGON_USE_MEMPOOL=ON`)
-  - [ ] dspqueue (`GGML_HEXAGON_USE_MEMPOOL=OFF`)
+  and setup steps. Local machine verified with SDK 6.7.0.0, bundled Tools 21.0.04, and Android SDK CMake 3.30.5. Never commit or redistribute SDK files unless the license explicitly permits it.
+- [x] Supply `PREBUILT_LIB_DIR=android_aarch64` to CMake for the local Android build; keep the CI-side validation/check aligned.
+- [x] Build both Android APK configurations locally with the licensed SDK; Gradle and the packaging script succeeded for:
+  - [x] FastRPC + mempool (`GGML_HEXAGON_USE_MEMPOOL=ON`)
+  - [x] dspqueue (`GGML_HEXAGON_USE_MEMPOOL=OFF`)
 - [x] Wire each Android JNI build to its matching upstream HTP v75 ExternalProject and stage the DSP skeleton as an APK asset, not an arm64 JNI library.
 - [x] Stage the pinned FastRPC `ggml-hexagon.cfg` separately from dspqueue and embed backend/SoC/ABI metadata.
-- [x] Add a Windows dual-APK build script with isolated CMake caches and APK-entry validation; licensed SDK execution remains pending.
+- [x] Add and execute the Windows dual-APK build script with isolated CMake caches and APK-entry validation; both licensed-SDK builds passed locally.
 - [ ] Make target scope explicit: Android arm64 AP libraries and HTP v75 DSP skeleton for SM8650.
 - [ ] Avoid spending CI time building unrelated HTP variants unless they are deliberately retained.
 - [ ] Verify the artifact contains every required AP-side `.so`, DSP skeleton, dependency, and
@@ -96,8 +95,8 @@
   storage/RAM.
 - [ ] Verify the device is SM8650 and confirm the expected HTP v75 runtime path/version using
   supported diagnostics; do not infer successful DSP use merely from successful library loading.
-- [ ] Add separate deployment commands for FastRPC and dspqueue.
-- [ ] Deploy the correct AP libraries and matching DSP skeleton to their required locations.
+- [x] Add separate deployment commands for FastRPC and dspqueue (`scripts/deploy-hexagon-runtime.ps1`).
+- [x] Add deployment of the APK-managed AP `.so` set together with its matching HTP v75 skeleton and FastRPC config.
 - [ ] Check file permissions, SELinux constraints, linker search paths, and DSP loader diagnostics.
 - [ ] Add a smoke test that proves an HTP operation actually executes on DSP.
 - [ ] Capture logcat, DSP/FastRPC diagnostics, exit codes, and relevant crash/tombstone information.
@@ -155,33 +154,33 @@
 
 ## Next-context handoff — start here (2026-11-01)
 
-**Immediate objective:** build the FastRPC+mempool and dspqueue JNI APK variants with the licensed SDK, audit/package matching AP/DSP dependencies, then validate a deterministic Gemma 4 GGUF prompt on the RMX3800. Do not redo the Android migration or QNN startup test.
+**Immediate objective:** deploy and validate the two successfully built FastRPC+mempool and dspqueue APKs on the RMX3800, prove actual HTP v75 execution, then run a deterministic Gemma 4 GGUF prompt and PP/TG benchmarks. Do not redo the Android migration or QNN startup test.
 
 ### First actions in the next context
 
 1. Read `README.md`, `docs/architecture.md`, `docs/build-android.md`, `docs/model-setup.md`, `docs/device-setup-rmx3800.md`, `docs/source-migration.md`, and this handoff.
 2. Inspect target-repository `git status` and current `native/`, `scripts/`, and CI files. Work only in this repository.
-3. Inspect the pinned ggml-hexagon checkout read-only at commit `a5e6be5e032eaf22e6a1154e2b6ab34a76a13a8d`; record its actual exported API, CMake targets, AP libraries, DSP skeleton names, and deployment assumptions. Do not assume a guessed JNI ABI or library list.
+3. Inspect the pinned ggml-hexagon checkout at commit `a5e6be5e032eaf22e6a1154e2b6ab34a76a13a8d`; preserve and review its one local CMake patch that forwards `CMAKE_MAKE_PROGRAM` into both HTP ExternalProjects. Record its actual exported API, CMake targets, AP libraries, DSP skeleton names, and deployment assumptions. Do not assume a guessed JNI ABI or library list.
 4. Confirm the selected llama.cpp/ggml revision really loads Gemma 4 E2B-it GGUF Q4_0. The pinned Hexagon backend source's Gemma 4 architecture/conversion/tokenizer/chat-template code is evidence of source support only, not proof of the target model running on HTP.
 5. Review `native/integration-design.md` and the artifact manifests; keep FastRPC+mempool and dspqueue as mutually matched build/runtime variants.
-6. Build both transport variants with the pinned SDK, then complete AP dependency closure and deployment scripts. The JNI model/session and registry selection slice is already present; target-device model inference remains to be tested.
+6. Both transport APKs now build locally with the licensed SDK; verify/complete AP dependency closure and deployment scripts before device installation. The JNI model/session and registry selection slice is already present; target-device model inference remains to be tested.
 7. Build and test on host/CI, install on the connected RMX3800 only when ready, and prove DSP execution from runtime diagnostics. Keep QNN/ONNX and ggml-hexagon results clearly separate.
 
 ### Environment and verified facts
 
 - Target repo: `D:\mcp-agent-workspace\ggml-hexagon-gemma4`.
 - Read-only source app: `D:\mcp-agent-workspace\gemma-android-app`, source HEAD `364619abc9b7235e1f12d3944f619934dee81996`; its original working tree had two modified tracked files which were preserved during migration.
-- Read-only upstream: `D:\mcp-agent-workspace\ggml-hexagon`, branch `self-build-jz`, HEAD `a5e6be5e032eaf22e6a1154e2b6ab34a76a13a8d`.
+- Pinned upstream: `D:\mcp-agent-workspace\ggml-hexagon`, branch `self-build-jz`, HEAD `a5e6be5e032eaf22e6a1154e2b6ab34a76a13a8d`. Its only current worktree change is an uncommitted two-hunk patch adding `-DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}` to both HTP `ExternalProject_Add` configurations.
 - Android module builds locally with JDK 17 / Gradle 8.9. `:app:testDebugUnitTest`: 15 tests passed; `:app:assembleDebug`: succeeded. APK path: `app/build/outputs/apk/debug/app-debug.apk`.
 - Device seen over ADB: realme RMX3800, SM8650, Android 16, arm64-v8a. ADB serial at the time was `adb-db6fad9-xYzn4j._adb-tls-connect._tcp`; re-run `adb devices -l` rather than assuming it persists.
 - The debug APK was installed on the device and the migrated ONNX Runtime app logged QNN HTP decoder session initialization. Its embedding graph fell back to CPU. Tokenizer files were pushed from the original app checkout and SHA-256 verified. No deterministic prompt was submitted; this is not a ggml-hexagon smoke test.
-- Current default app engine remains ONNX Runtime + QNN. An optional JNI llama/GGUF path and compile-time ggml Hexagon registry/device selection now exist; licensed transport packaging and ggml DSP deployment remain pending.
+- Current default app engine remains ONNX Runtime + QNN. An optional JNI llama/GGUF path and compile-time ggml Hexagon registry/device selection exist. Both licensed transport APKs have now built and passed APK-entry checks locally; deployment and ggml DSP runtime validation remain pending.
 - Android workflow: `.github/workflows/android-app.yml`. Hexagon artifacts are built separately by the existing native workflow/script. Android workflow has been added but a GitHub Actions run for it is still pending.
 - Do not assume the connected ADB device remains available in the next context. Do not uninstall the app or wipe app data; use `adb install -r` unless explicitly instructed otherwise.
 
 ### Important boundaries
 
-- Do not modify either source checkout or the pinned upstream checkout.
+- Keep the original `gemma-android-app` source checkout untouched. The pinned `ggml-hexagon` HEAD must remain at the expected commit; preserve/review its one intentional, uncommitted Windows Ninja-propagation patch and do not reset or discard it without an explicit decision.
 - Do not commit model/tokenizer payloads, credentials, personal device logs, build outputs, or Qualcomm SDK/toolchain files.
 - Qualcomm Hexagon SDK 6.7.0.0 and Hexagon Tools 21.0.04 are licensed prerequisites; verify availability/licensing rather than copying them into the repo.
 - Do not mark HTP execution complete based only on a successful cross-build, APK install, QNN initialization, library load, or app launch.
@@ -190,7 +189,7 @@
 
 ---
 
-## Current known state (2026-11-01)
+## Current known state (updated 2026-11-02)
 
 - [x] GitHub Actions can build the two Android arm64 Hexagon backend configurations using the
   pinned upstream source.
@@ -198,10 +197,11 @@
 - [x] Latest successful run: [Actions run 41278349559](https://github.com/bombless/ggml-hexagon-gemma4/actions/runs/41278349559).
 - [x] That run uploaded artifact `gemma4-hexagon-android-arm64-46f015b963f9dc1720b8bec4c1daeca6c8f305ed`.
 - [x] Android app source has been migrated into this repository; the current migrated engine is ONNX Runtime/QNN and is not yet wired to ggml-hexagon.
-- [ ] JNI/native application integration is partially implemented: llama/ggml Hexagon registration and HTP device selection are wired; transport build, deployment, inference, and device verification remain open.
+- [x] Both transport-specific Android APKs were built locally with Qualcomm Hexagon SDK 6.7.0.0 / bundled Hexagon Tools 21.0.04 and passed the build script's required APK-entry checks.
+- [ ] JNI/native application integration is partially implemented: llama/ggml Hexagon registration, HTP device selection, and transport-specific APK packaging are present; deployment, inference, and device verification remain open.
 - [ ] ggml-hexagon deployment and HTP v75 DSP execution have not yet been verified. (The separate ONNX/QNN app startup test on RMX3800 is documented; it is not ggml validation.)
 - [ ] No RMX3800 PP/TG benchmark has been run.
-- [ ] Current CI success is a native backend cross-build result, not proof of a complete runnable app.
+- [ ] Current CI success is a native backend cross-build result, not proof of a complete runnable app. The two local licensed-SDK APK builds are also compile/package evidence only, not proof of on-device DSP execution.
 
 ## Progress log (2026-11-01)
 
@@ -254,3 +254,25 @@ The project is not considered complete until a clean checkout can build an insta
 both backend artifact sets, install and launch on the RMX3800, load the documented Gemma 4 E2B
 model, demonstrate actual HTP v75 execution for each backend, and produce repeatable PP/TG
 benchmark results with raw logs and metadata.
+
+## Progress log (2026-11-02, Windows licensed dual-APK build)
+
+- Installed Android SDK CMake `3.30.5` (the configured SDK repository did not offer `3.28.3`) and updated `app/build.gradle.kts` to use `3.30.5`. Added `-DPREBUILT_LIB_DIR=android_aarch64` to the Android CMake arguments.
+- Updated `scripts/build-android-hexagon-apks.ps1` to derive the bundled Hexagon Tools path from `$SdkRoot\hexagon_sdk.json` (`root.tools.info[0].path`) and verify `Tools\bin\hexagon-clang.exe`; it no longer depends on the `HEXAGON_TOOLS_ROOT` environment variable. It still accepts `HEXAGON_SDK_ROOT` (or `-SdkRoot`) as the SDK root.
+- SDK environment verified: `D:\Hexagon_SDK_WinNT\6.7.0.0`; bundled Hexagon Tools `21.0.04`. Qualcomm's CMake helper expected `ipc/fastrpc/qaic/bin/qaic.exe`, while this Windows SDK provided `ipc/fastrpc/qaic/WinNT/qaic.exe`; copied the SDK-provided executable into the expected `bin` location in the local SDK installation. No SDK files were added to the repository.
+- Fixed Ninja discovery for the nested HTP DSP ExternalProjects by adding `-DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}` to both `ExternalProject_Add` CMake argument lists in `D:\mcp-agent-workspace\ggml-hexagon\ggml\src\ggml-hexagon\CMakeLists.txt`. This is an intentional, uncommitted change in the pinned upstream working tree; HEAD remains `a5e6be5e032eaf22e6a1154e2b6ab34a76a13a8d`. Do not describe that checkout as clean or untouched until this patch is either upstreamed/documented in the maintained source strategy or deliberately reverted after an equivalent fix is carried elsewhere.
+- Ran `scripts/build-android-hexagon-apks.ps1` successfully for both variants. The script verifies the pinned upstream HEAD, clears only generated `app/.cxx` native intermediates between variants, checks required APK entries (JNI/AP Hexagon libraries, HTP v75 DSP asset, backend metadata, and FastRPC config where applicable), and copies each APK to `artifacts/apk/`.
+- Verified artifacts:
+  - `artifacts/apk/gemma4-fastrpc-mempool-debug.apk` — 328,762,193 bytes; SHA-256 `B8F9863A0C02C008172D9F5F7977F3081AEF78D23A698F8E07DA74E297BCB978`.
+  - `artifacts/apk/gemma4-dspqueue-debug.apk` — 328,762,193 bytes; SHA-256 `D09F9F8F6DE060CA81BD8B2AEE4218296FC967DD306C715B9DAA8A71BC10D13B`.
+- Gradle daemon logs report `BUILD SUCCESSFUL` for both variants (approximately 2m05s for FastRPC+mempool and 1m55s for dspqueue). Compiler emitted a warning but no build failure. `artifacts/apk/` is ignored/generated output; target repository `git status --short` was clean after the build. Upstream `git status --short` showed only `M ggml/src/ggml-hexagon/CMakeLists.txt`.
+- Remaining: complete transitive AP ELF dependency audit; implement/verify deployment paths and backend switching; install the ggml APK on RMX3800; prove DSP execution from runtime diagnostics; load and run Gemma 4 E2B-it GGUF Q4_0; collect deterministic inference logs and PP/TG benchmark data. Do not equate APK package checks with HTP runtime success.
+
+## Progress log (2026-11-02, GGUF chat and matched runtime integration)
+
+- Added an ONNX/QNN versus GGUF/llama.cpp selector to the Compose chat toolbar. GGUF model discovery expects `gemma-4-E2B-it-Q4_0.gguf` under app-specific `models/`; no model weights are packaged or downloaded. JNI applies the GGUF embedded chat template, clears KV memory per turn, streams token pieces, and closes with the ViewModel. Conversation history is flattened into a single user message; GGUF audio and JavaScript tool integration remain future work.
+- Added `GGML_HEXAGON_BACKEND` / `GGML_JNI_ENABLED` build identities and disables the GGUF selector when the optional JNI target is not included. `HexagonRuntimeAssets` checks backend/HTP-v75/arm64/upstream metadata, required AP `.so` files, and deployed skeleton/config SHA-256 before JNI initialization.
+- Inspected pinned FastRPC loader source: Android config and runtime directory are hard-coded to `/data/local/tmp`; `ADSP_LIBRARY_PATH` uses `;` and `LD_LIBRARY_PATH` uses `:`. Added `scripts/deploy-hexagon-runtime.ps1` to validate APK metadata/AP libraries, install the selected APK, deploy its HTP v75 skeleton, and deploy FastRPC config only for the FastRPC variant. The app rejects missing/stale deployed files.
+- Validation passed: default `:app:testDebugUnitTest :app:assembleDebug`; optional CPU JNI `:app:externalNativeBuildDebug` and `:app:assembleDebug`; final `:app:testDebugUnitTest` (39s after transport-cleanup fix); both PowerShell scripts parse; and `git diff --check` is clean. Fixed the build script's unavailable `Get-FileHash` dependency by switching to streaming .NET SHA-256.
+- Final licensed transport APKs independently verified from their ZIP entries: `artifacts/apk/gemma4-fastrpc-mempool-debug.apk` — 328,762,193 bytes, SHA-256 `AADD68DDB2C7509F956FD0C5A994194CA7E242F51E91F1BC5B6FE96F886552AF`; backend `fastrpc-mempool`, arm64 AP `libggml-hexagon.so` + JNI, HTP-v75 skeleton, FastRPC cfg present. `artifacts/apk/gemma4-dspqueue-debug.apk` — 328,762,113 bytes, SHA-256 `B581811DA555AFEE4FBCCBF4F2B3A8FB5B0F126ACCBF38C9290316E757CBD82A`; backend `dspqueue`, arm64 AP `libggml-hexagon.so` + JNI, its HTP-v75 skeleton, and no FastRPC cfg. Found and fixed a stale FastRPC cfg leak from AGP's shared generated asset directory: dspqueue CMake now removes it, runtime rejects it, and the build script fails if it reappears. The deployment script requires `libggml-hexagon.so` in the AP set.
+- HTP device deployment, SELinux/loader access, Gemma 4 GGUF inference on RMX3800, proof of actual DSP execution, and PP/TG benchmarking remain unverified. Do not report APK compilation or skeleton loading as DSP execution.

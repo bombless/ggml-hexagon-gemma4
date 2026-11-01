@@ -52,6 +52,7 @@ fun ChatScreen(
     val messages by viewModel.messages.collectAsState()
     val isGenerating by viewModel.isGenerating.collectAsState()
     val backendStatus by viewModel.backendStatus.collectAsState()
+    val engineMode by viewModel.engineMode.collectAsState()
     val generationSpeed by viewModel.generationSpeed.collectAsState()
     val generatedTokens by viewModel.generatedTokens.collectAsState()
     val downloadProgress by viewModel.downloadProgress.collectAsState()
@@ -60,6 +61,7 @@ fun ChatScreen(
     val isEngineReady by viewModel.isEngineReady.collectAsState()
 
     var inputText by remember { mutableStateOf("") }
+    var engineMenuExpanded by remember { mutableStateOf(false) }
     var isRecording by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
@@ -171,6 +173,22 @@ fun ChatScreen(
                     }
                 },
                 actions = {
+                    Box {
+                        TextButton(onClick = { engineMenuExpanded = true }, enabled = !isGenerating) {
+                            Text(engineMode, fontSize = 11.sp)
+                        }
+                        DropdownMenu(expanded = engineMenuExpanded, onDismissRequest = { engineMenuExpanded = false }) {
+                            DropdownMenuItem(text = { Text("ONNX / QNN（现有引擎）") }, onClick = {
+                                engineMenuExpanded = false
+                                viewModel.useOnnxEngine()
+                            })
+                            DropdownMenuItem(enabled = com.example.gemmaapp.BuildConfig.GGML_JNI_ENABLED,
+                                text = { Text("GGUF / llama.cpp（${com.example.gemmaapp.BuildConfig.GGML_HEXAGON_BACKEND}）") }, onClick = {
+                                engineMenuExpanded = false
+                                viewModel.useGgufEngine()
+                            })
+                        }
+                    }
                     IconButton(onClick = { viewModel.clearHistory() }) {
                         Icon(Icons.Default.Delete, contentDescription = "Clear History")
                     }

@@ -33,6 +33,22 @@ This defaults to CPU. To compile and register Hexagon, select exactly one transp
 
 The APK's backend identity is fixed at build time; a JNI request for a different transport is rejected. See `native/README.md` for registry behavior and runtime requirements.
 
+### Use GGUF in the existing chat UI
+
+Build the optional JNI APK (CPU-only llama path):
+
+    ./gradlew.bat :app:assembleDebug -PggmlHexagonSource=D:/mcp-agent-workspace/ggml-hexagon -PggmlHexagonBackend=cpu
+
+For HTP, build one of the two transport-specific APKs with the licensed SDK using the commands above. Put `gemma-4-E2B-it-Q4_0.gguf` in the app's external files `models/` directory (or private `files/models/`); the app does not download or package GGUF weights. Select **GGUF / llama.cpp** from the chat toolbar. The GGUF path uses the model's embedded chat template and token streaming. Audio input and the JavaScript tool loop remain on the ONNX/QNN path; switch back to ONNX/QNN to use them.
+
+For a Hexagon APK, deploy the matching DSP files before selecting GGUF:
+
+    powershell -ExecutionPolicy Bypass -File scripts/deploy-hexagon-runtime.ps1 -Backend fastrpc-mempool -Apk artifacts/apk/gemma4-fastrpc-mempool-debug.apk
+    # or
+    powershell -ExecutionPolicy Bypass -File scripts/deploy-hexagon-runtime.ps1 -Backend dspqueue -Apk artifacts/apk/gemma4-dspqueue-debug.apk
+
+The deployment script verifies APK backend/SoC-generation/ABI metadata and required AP `.so` entries, installs the APK (the Android linker-managed AP libraries), and pushes the matching `libggml-htp-v75.so` to `/data/local/tmp`; FastRPC additionally deploys its matching `ggml-hexagon.cfg`. Runtime startup checks the deployed DSP skeleton/config hashes against the APK assets and refuses a mismatched or missing bundle. This prevents stale cross-transport assets from being silently reused. It does not prove that HTP executed an operator: collect DSP/FastRPC diagnostics and run a deterministic prompt on the RMX3800 before claiming HTP inference.
+
 To build **both isolated JNI APKs** on Windows, set `HEXAGON_SDK_ROOT` and `HEXAGON_TOOLS_ROOT` (or let the SDK manifest resolve tools), then run:
 
     powershell -ExecutionPolicy Bypass -File scripts/build-android-hexagon-apks.ps1

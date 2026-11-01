@@ -37,7 +37,10 @@ else()
     endif()
 endif()
 
-set(LLAMA_BUILD_COMMON OFF CACHE BOOL "" FORCE)
+# llama-common provides the Jinja renderer and Gemma 4's specialized chat
+# template handler. llama_chat_apply_template() in libllama is only a
+# heuristic formatter and cannot render arbitrary GGUF templates.
+set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -53,7 +56,7 @@ target_compile_features(gemma4_jni PRIVATE cxx_std_17)
 target_include_directories(gemma4_jni PRIVATE "${LLAMA_CPP_DIR}/include" "${LLAMA_CPP_DIR}/ggml/include")
 target_compile_definitions(gemma4_jni PRIVATE GEMMA4_HEXAGON_BACKEND_NAME="${GEMMA4_HEXAGON_BACKEND}")
 find_library(log-lib log)
-target_link_libraries(gemma4_jni PRIVATE llama ${log-lib})
+target_link_libraries(gemma4_jni PRIVATE llama-common llama ${log-lib})
 
 if (NOT GEMMA4_HEXAGON_BACKEND STREQUAL "cpu")
     if (NOT TARGET ggml-hexagon)
@@ -102,6 +105,9 @@ if (NOT GEMMA4_HEXAGON_BACKEND STREQUAL "cpu")
             COMMENT "Staging FastRPC runtime configuration")
         add_dependencies(gemma4_jni gemma4_stage_fastrpc_config)
     else()
+        # AGP reuses this generated asset directory across transport variants.
+        # Remove any previous FastRPC cfg so it cannot leak into dspqueue APKs.
+        file(REMOVE "${GEMMA4_HEXAGON_ASSET_DIR}/hexagon/ap/ggml-hexagon.cfg")
         add_dependencies(gemma4_jni gemma4_stage_hexagon_assets)
     endif()
 endif()

@@ -5,6 +5,10 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.gemmaapp.engine.GemmaEngine
+import com.example.gemmaapp.engine.NativeLlamaSession
+import com.example.gemmaapp.engine.HexagonRuntimeAssets
+import com.example.gemmaapp.BuildConfig
+import java.io.File
 import com.example.gemmaapp.engine.Gemma4AudioFeatureExtractor
 import com.example.gemmaapp.engine.JavaScriptToolRuntime
 import com.example.gemmaapp.engine.ToolCallParser
@@ -16,6 +20,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CoroutineScope
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -54,6 +59,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val isEngineReady: StateFlow<Boolean> = _isEngineReady.asStateFlow()
 
     private var engine: GemmaEngine? = null
+    private var ggufSession: NativeLlamaSession? = null
+    private val _engineMode = MutableStateFlow("ONNX/QNN")
+    val engineMode: StateFlow<String> = _engineMode.asStateFlow()
     private val javaScriptRuntime = JavaScriptToolRuntime()
     private var isLoadingEngine = false
 
@@ -122,8 +130,64 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (engine == null && !_isDownloadingModels.value) loadEngine()
     }
 
+    fun useOnnxEngine() {
+        if (_isGenerating.value) return
+        ggufSession?.close()
+        ggufSession = null
+        _engineMode.value = "ONNX/QNN"
+        if (engine == null) loadEngine()
+        else _backendStatus.value = "运行后端: ${engine?.backendName ?: "ONNX/QNN"}"
+    }
+
+    fun useGgufEngine() {
+        if (_isGenerating.value) return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                _backendStatus.value = "检查 GGUF / ${BuildConfig.GGML_HEXAGON_BACKEND} 运行时..."
+                val modelDirs = listOfNotNull(
+                    getApplication<Application>().getExternalFilesDir(null)?.let { File(it, "models") },
+                    File(getApplication<Application>().filesDir, "models")
+                )
+                val model = modelDirs.asSequence()
+                    .flatMap { dir -> dir.listFiles()?.asSequence().orEmpty() }
+                    .filter { it.isFile && it.extension.equals("gguf", ignoreCase = true) &&
+                        it.length() > 1024L * 1024L && it.canRead() }
+                    .sortedBy { it.name }
+                    .firstOrNull()
+                    ?: throw IllegalStateException("未找到 GGUF。请将 .gguf 模型文件放入 ${modelDirs.first().absolutePath}/")
+                if (ggufSession == null) {
+                    // Must run before NativeLlamaSession initializes System.loadLibrary().
+                    HexagonRuntimeAssets.prepare(getApplication(), BuildConfig.GGML_HEXAGON_BACKEND)
+                    val openedSession = NativeLlamaSession.open(model, contextSize = 4096, threads = 4,
+                        backend = BuildConfig.GGML_HEXAGON_BACKEND)
+                    // Avoid keeping both large inference runtimes resident on a phone.
+                    engine?.close()
+                    engine = null
+                    ggufSession = openedSession
+                }
+                _engineMode.value = "GGUF"
+                _isEngineReady.value = true
+                _backendStatus.value = "GGUF: ${model.name} · ${BuildConfig.GGML_HEXAGON_BACKEND}"
+                _messages.value = _messages.value + ChatMessage(sender = ChatMessage.Sender.SYSTEM,
+                    text = "已切换到 GGUF 引擎。语音输入和 JavaScript 工具目前仅由 ONNX/QNN 路径提供。")
+            } catch (error: Throwable) {
+                Log.e(TAG, "GGUF engine initialization failed", error)
+                _backendStatus.value = "GGUF 初始化失败: ${error.message}"
+                _messages.value = _messages.value + ChatMessage(sender = ChatMessage.Sender.SYSTEM,
+                    text = "GGUF 引擎未切换：${error.message ?: error.javaClass.simpleName}")
+            }
+        }
+    }
+
     fun sendMessage(promptText: String, audioSamples: FloatArray? = null) {
         if ((promptText.isBlank() && audioSamples == null) || _isGenerating.value) return
+        if (_engineMode.value == "GGUF") {
+            if (audioSamples != null) {
+                _messages.value = _messages.value + ChatMessage(sender = ChatMessage.Sender.SYSTEM,
+                    text = "当前 GGUF JNI 路径暂不支持音频输入，请切回 ONNX/QNN。")
+            } else sendGgufMessage(promptText.trim())
+            return
+        }
 
         val audioTokenCount = audioSamples?.let {
             Gemma4AudioFeatureExtractor.softTokenCountForSamples(it.size)
@@ -286,6 +350,53 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun sendGgufMessage(text: String) {
+        val session = ggufSession ?: run {
+            _messages.value = _messages.value + ChatMessage(sender = ChatMessage.Sender.SYSTEM,
+                text = "GGUF 会话未初始化，请重新选择 GGUF 引擎。")
+            return
+        }
+        val history = _messages.value.filter { it.sender == ChatMessage.Sender.USER || it.sender == ChatMessage.Sender.MODEL }
+            .mapNotNull { message -> message.text.takeIf { it.isNotBlank() }?.let {
+                (if (message.sender == ChatMessage.Sender.USER) "User: " else "Assistant: ") + it
+            } }.joinToString("\n")
+        val prompt = if (history.isBlank()) text else "$history\nUser: $text\nAssistant:"
+        _messages.value = _messages.value + ChatMessage(sender = ChatMessage.Sender.USER, text = text) +
+            ChatMessage(sender = ChatMessage.Sender.MODEL, text = "")
+        _isGenerating.value = true
+        _generationSpeed.value = 0f
+        _generatedTokens.value = 0
+        viewModelScope.launch(Dispatchers.IO) {
+            val output = StringBuilder()
+            val start = System.nanoTime()
+            var tokenCount = 0
+            var errorText: String? = null
+            try {
+                session.generate(prompt, maxTokens = 768, listener = object : NativeLlamaSession.Listener {
+                    override fun onToken(text: String) {
+                        output.append(text)
+                        tokenCount++
+                        val elapsed = ((System.nanoTime() - start) / 1_000_000_000.0).coerceAtLeast(0.001)
+                        _generatedTokens.value = tokenCount
+                        _generationSpeed.value = (tokenCount / elapsed).toFloat()
+                        updateLastMessage(output.toString())
+                    }
+                    override fun onComplete(status: String) { Log.i(TAG, "GGUF generation complete: $status") }
+                    override fun onError(message: String) { errorText = message }
+                })
+            } catch (error: Throwable) {
+                errorText = error.message ?: error.javaClass.simpleName
+                Log.e(TAG, "GGUF generation failed", error)
+            } finally {
+                val duration = ((System.nanoTime() - start) / 1_000_000L).coerceAtLeast(1L)
+                val finalText = output.toString() + (errorText?.let { "\n[GGUF 错误] $it" } ?: "")
+                finishLastMessage(finalText, duration, tokenCount, tokenCount * 1000f / duration,
+                    thinking = "", toolCalls = emptyList())
+                _isGenerating.value = false
+            }
+        }
+    }
+
     private fun updateLastMessage(newText: String, thinking: String? = null, toolCalls: List<ToolCallInfo>? = null) {
         val currentList = _messages.value.toMutableList()
         if (currentList.isNotEmpty()) {
@@ -334,6 +445,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         super.onCleared()
         engine?.close()
+        ggufSession?.let { session ->
+            session.cancel()
+            // Native destroy waits for any in-flight decode; never block the main thread.
+            CoroutineScope(Dispatchers.IO).launch { session.close() }
+        }
     }
 
     companion object {

@@ -64,6 +64,8 @@ android {
         versionName = "1.0"
         buildConfigField("String", "GIT_COMMIT", "\"$gitCommit\"")
         buildConfigField("boolean", "GIT_DIRTY", gitDirty.toString())
+        buildConfigField("String", "GGML_HEXAGON_BACKEND", "\"$ggmlHexagonBackend\"")
+        buildConfigField("boolean", "GGML_JNI_ENABLED", (ggmlHexagonSource != null).toString())
 
         ndk {
             abiFilters += "arm64-v8a"
