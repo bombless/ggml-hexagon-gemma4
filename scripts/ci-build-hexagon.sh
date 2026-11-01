@@ -44,7 +44,9 @@ git -C "$WORK_ROOT" checkout --detach "$UPSTREAM_REF"
 printf 'Upstream revision: '; git -C "$WORK_ROOT" rev-parse HEAD
 
 build_variant() {
-  local name="$1" use_mempool="$2" build_dir="$WORK_ROOT/build-$name"
+  local name="$1"
+  local use_mempool="$2"
+  local build_dir="$WORK_ROOT/build-$name"
   echo "=== Configure $name (GGML_HEXAGON_USE_MEMPOOL=$use_mempool) ==="
   cmake -S "$WORK_ROOT" -B "$build_dir" \
     -DCMAKE_BUILD_TYPE=Release \
