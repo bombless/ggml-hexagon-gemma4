@@ -1,38 +1,61 @@
 # Gemma 4 Android + Hexagon
 
-Android application and reproducible Snapdragon Hexagon build/benchmark workspace for Gemma 4 E2B.
+This repository combines a migrated Android chat application with reproducible Android-arm64 ggml-hexagon backend cross-builds for the realme RMX3800 / Snapdragon 8 Gen 3 (SM8650, HTP v75) target.
 
-## Current target
-
-- Device: realme RMX3800 / Snapdragon 8 Gen 3 (SM8650)
-- HTP: v75
-- Model: Gemma 4 E2B-it, GGUF Q4_0
-- Backends under comparison: FastRPC + mempool and dspqueue
-
-Do not compare measurements from another SoC as if they were measurements from this device.
+**Important status distinction:** the migrated Android application currently uses ONNX Runtime with Qualcomm QNN HTP (and CPU fallback). An optional llama/ggml JNI path now compiles the pinned Hexagon backend into a transport-specific APK and selects the registered HTP device through llama model parameters. The Hexagon build requires the licensed Qualcomm SDK and matching AP/DSP runtime deployment; no ggml HTP execution or benchmark on the device is claimed yet.
 
 ## Repository layout
 
-- `app/` — Android application (to be added)
-- `native/` — JNI/CMake integration (to be added)
-- `scripts/` — build and device-side benchmark helpers
-- `.github/workflows/` — GitHub Actions cross-build and artifact publishing
-- `docs/` — setup and benchmark notes
+- app/ — migrated Kotlin/Compose Android application and unit tests (currently QNN/ONNX Runtime).
+- native/ — JNI llama session source, optional Android CMake target, and integration design (`native/integration-design.md`).
+- scripts/ci-build-hexagon.sh and scripts/validate-hexagon-artifacts.py — pinned upstream Android-arm64 builds, isolated AP/HTP v75 bundles, and per-backend SHA-256 manifests.
+- .github/workflows/ — separate Hexagon artifact and Android APK CI workflows.
+- docs/ — architecture, build, model provisioning, RMX3800 setup, benchmark protocol, and migration provenance.
+- gradlew, gradlew.bat — Gradle 8.9 wrapper.
 
-## Build artifacts with GitHub Actions
+## Build the Android app
 
-Run **Hexagon Android artifacts** from the Actions tab (or push this repository). The workflow checks out the pinned `ggml-hexagon` revision and builds both variants for Android arm64. It uploads the AP-side shared libraries and DSP skeletons; it does not require or attempt to access a phone.
+Requirements: JDK 17, Android SDK with platform 35 and an arm64-capable NDK, and network access to configured Maven repositories.
 
-The Qualcomm Hexagon SDK 6.7.0.0 and Hexagon Tools 21.0.04 are subject to Qualcomm's license terms (PKLA/ECA). The workflow uses a preinstalled SDK if the Snapdragon toolchain image provides one. Otherwise provide the SDK in your own compliant build environment and set `HEXAGON_SDK_ROOT` / `HEXAGON_TOOLS_ROOT`; do not commit the SDK or redistribute it as a public artifact unless your license permits that.
+    ./gradlew.bat :app:testDebugUnitTest
+    ./gradlew.bat :app:assembleDebug
 
-## Device benchmark
+APK: app/build/outputs/apk/debug/app-debug.apk.
 
-The actual PP/TG comparison must run on the RMX3800. Download the workflow artifact, deploy the two matching library sets with ADB, then run the same model, prompt, context, batch, thread, and warm-up settings for each backend. Keep the raw logs and record Android build, thermal state, power mode, model SHA-256, and backend revision with every result.
+The app's present ONNX runtime expects the six graph/data files and two tokenizer binaries documented in model setup. Binary weights and tokenizer files are intentionally excluded from Git. Build the optional GGUF JNI target against the pinned source checkout:
 
-The workflow artifact is a build output, not a benchmark result. Device-side execution and result collection will be added in a later step.
+    ./gradlew.bat :app:assembleDebug -PggmlHexagonSource=D:/mcp-agent-workspace/ggml-hexagon
+
+This defaults to CPU. To compile and register Hexagon, select exactly one transport and supply the licensed SDK (and optionally tools) path:
+
+    ./gradlew.bat :app:assembleDebug -PggmlHexagonSource=D:/mcp-agent-workspace/ggml-hexagon -PggmlHexagonBackend=fastrpc-mempool -PhexagonSdkRoot=D:/Qualcomm/Hexagon_SDK/6.7.0.0
+    ./gradlew.bat :app:assembleDebug -PggmlHexagonSource=D:/mcp-agent-workspace/ggml-hexagon -PggmlHexagonBackend=dspqueue -PhexagonSdkRoot=D:/Qualcomm/Hexagon_SDK/6.7.0.0
+
+The APK's backend identity is fixed at build time; a JNI request for a different transport is rejected. See `native/README.md` for registry behavior and runtime requirements.
+
+To build **both isolated JNI APKs** on Windows, set `HEXAGON_SDK_ROOT` and `HEXAGON_TOOLS_ROOT` (or let the SDK manifest resolve tools), then run:
+
+    powershell -ExecutionPolicy Bypass -File scripts/build-android-hexagon-apks.ps1
+
+The script verifies the pinned upstream HEAD, clears only the generated `.cxx` native cache between transport builds, checks that each APK contains the JNI/AP Hexagon libraries and its matching HTP v75 DSP skeleton, and writes SHA-256-hashed APKs under `artifacts/apk/`. FastRPC additionally carries the upstream `ggml-hexagon.cfg`. DSP skeletons are APK assets, not arm64 JNI libraries; they still require deployment to a Qualcomm-supported DSP loader location before HTP execution. The APK packaging check is not a device smoke test.
+
+## Build the ggml-hexagon artifacts
+
+Run **Hexagon Android artifacts** from GitHub Actions, or execute bash scripts/ci-build-hexagon.sh in a compliant Linux environment with Android NDK, Qualcomm Hexagon SDK 6.7.0.0, and Hexagon Tools 21.0.04 installed. The workflow checks out upstream commit a5e6be5e032eaf22e6a1154e2b6ab34a76a13a8d and builds:
+
+- FastRPC + mempool: GGML_HEXAGON_USE_MEMPOOL=ON
+- dspqueue: GGML_HEXAGON_USE_MEMPOOL=OFF
+
+Qualcomm SDK/toolchain files are proprietary/licensed prerequisites. Do not commit or redistribute them unless the applicable license permits it. See Android build.
+
+## Device and benchmark status
+
+No ggml-hexagon HTP smoke test or PP/TG benchmark is claimed complete. A separate QNN app smoke test was run on the RMX3800: the app launched and initialized its ONNX Runtime QNN HTP decoder session, while the embedding graph fell back to CPU. This does not validate the ggml FastRPC/dspqueue artifacts. Follow device setup and benchmark protocol only after a licensed Hexagon APK and its matching AP/DSP artifacts have been built and deployed.
 
 ## Upstream source pin
 
 - Repository: https://github.com/ggml-hexagon/ggml-hexagon
-- Branch: `self-build-jz`
-- Commit: `a5e6be5e032eaf22e6a1154e2b6ab34a76a13a8d`
+- Branch: self-build-jz
+- Commit: a5e6be5e032eaf22e6a1154e2b6ab34a76a13a8d
+
+See docs/source-migration.md for the Android app source revision and locally modified files.

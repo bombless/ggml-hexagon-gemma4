@@ -9,3 +9,16 @@
 /prebuilts/
 /out/
 /.ccache*/
+
+# Android build outputs and local model payloads
+**/local.properties
+**/outputs/
+**/captures/
+*.apk
+*.aab
+*.onnx
+*.onnx_data
+*.gguf
+app/src/main/assets/models/*.bin
+artifacts/
+app/.cxx/**

@@ -5,23 +5,23 @@ UPSTREAM_URL="${GGML_HEXAGON_REPOSITORY:-https://github.com/ggml-hexagon/ggml-he
 UPSTREAM_REF="${GGML_HEXAGON_REF:-a5e6be5e032eaf22e6a1154e2b6ab34a76a13a8d}"
 WORK_ROOT="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ggml-hexagon-src"
 ARTIFACT_ROOT="${GITHUB_WORKSPACE:-$(pwd)}/artifacts/hexagon-android-arm64"
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
-# Discover SDK roots only when the caller/image has not supplied them.
 if [[ -z "${ANDROID_NDK_ROOT:-}" ]]; then
   for candidate in "${ANDROID_NDK:-}" "${ANDROID_HOME:-}/ndk"/* "${ANDROID_SDK_ROOT:-}/ndk"/* /opt/android-sdk/ndk/* /opt/android-sdk-linux/ndk/*; do
     [[ -n "$candidate" && -f "$candidate/build/cmake/android.toolchain.cmake" ]] || continue
     ANDROID_NDK_ROOT="$candidate"; break
   done
 fi
-[[ -n "${ANDROID_NDK_ROOT:-}" && -f "$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" ]] || fail "Android NDK not found. Set ANDROID_NDK_ROOT to an installed NDK."
+[[ -n "${ANDROID_NDK_ROOT:-}" && -f "$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" ]] || fail "Android NDK not found. Set ANDROID_NDK_ROOT."
 
 if [[ -z "${HEXAGON_SDK_ROOT:-}" ]]; then
   sdk_cmake="$(find /opt /usr/local /root -path '*/build/cmake/hexagon_arch.cmake' -print -quit 2>/dev/null || true)"
   [[ -n "$sdk_cmake" ]] && HEXAGON_SDK_ROOT="$(dirname "$(dirname "$(dirname "$sdk_cmake")")")"
 fi
-[[ -n "${HEXAGON_SDK_ROOT:-}" && -f "$HEXAGON_SDK_ROOT/build/cmake/hexagon_arch.cmake" ]] || fail "Qualcomm Hexagon SDK 6.7.0.0 not found. It must be installed under its license terms; set HEXAGON_SDK_ROOT."
+[[ -n "${HEXAGON_SDK_ROOT:-}" && -f "$HEXAGON_SDK_ROOT/build/cmake/hexagon_arch.cmake" ]] || fail "Qualcomm Hexagon SDK 6.7.0.0 not found; set HEXAGON_SDK_ROOT."
 
 if [[ -z "${HEXAGON_TOOLS_ROOT:-}" ]]; then
   if [[ -f "$HEXAGON_SDK_ROOT/hexagon_sdk.json" ]]; then
@@ -41,7 +41,9 @@ rm -rf "$WORK_ROOT" "$ARTIFACT_ROOT"
 mkdir -p "$(dirname "$WORK_ROOT")" "$ARTIFACT_ROOT"
 git clone --filter=blob:none "$UPSTREAM_URL" "$WORK_ROOT"
 git -C "$WORK_ROOT" checkout --detach "$UPSTREAM_REF"
-printf 'Upstream revision: '; git -C "$WORK_ROOT" rev-parse HEAD
+ACTUAL_UPSTREAM_COMMIT="$(git -C "$WORK_ROOT" rev-parse HEAD)"
+[[ "$ACTUAL_UPSTREAM_COMMIT" == "$UPSTREAM_REF" ]] || fail "Checked out unexpected upstream commit: $ACTUAL_UPSTREAM_COMMIT"
+printf 'Upstream revision: %s\n' "$ACTUAL_UPSTREAM_COMMIT"
 
 build_variant() {
   local name="$1"
@@ -59,12 +61,21 @@ build_variant() {
     -DHEXAGON_TOOLS_ROOT="$HEXAGON_TOOLS_ROOT"
   cmake --build "$build_dir" --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
   local dest="$ARTIFACT_ROOT/$name"
-  mkdir -p "$dest/bin" "$dest/dsp"
-  cp -av "$build_dir/bin/"*.so "$dest/bin/" 2>/dev/null || true
-  cp -av "$build_dir/bin/"llama-* "$dest/bin/" 2>/dev/null || true
-  find "$build_dir" -type f -name 'libggml-htp-v*.so' -exec cp -av {} "$dest/dsp/" \;
-  [[ -n "$(find "$dest" -type f -print -quit)" ]] || fail "No output files collected for $name"
-  (cd "$dest" && find . -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+  mkdir -p "$dest/ap" "$dest/dsp"
+  find "$build_dir/bin" -maxdepth 1 \( -type f -o -type l \) -name '*.so*' -exec cp -av {} "$dest/ap/" \;
+  [[ -s "$dest/ap/libggml-hexagon.so" ]] || fail "AP backend library missing for $name"
+  local htp_v75
+  htp_v75="$(find "$build_dir" -type f -name 'libggml-htp-v75.so' -print -quit)"
+  [[ -n "$htp_v75" && -s "$htp_v75" ]] || fail "HTP v75 DSP skeleton missing for $name"
+  cp -av "$htp_v75" "$dest/dsp/"
+  if [[ "$name" == "fastrpc" && -s "$build_dir/bin/ggml-hexagon.cfg" ]]; then
+    cp -av "$build_dir/bin/ggml-hexagon.cfg" "$dest/ap/"
+  fi
+  python3 "$SCRIPT_ROOT/validate-hexagon-artifacts.py" \
+    --root "$dest" --backend "$name" --upstream-commit "$ACTUAL_UPSTREAM_COMMIT" \
+    --sdk-version "${HEXAGON_SDK_VERSION:-6.7.0.0}" \
+    --tools-version "${HEXAGON_TOOLS_VERSION:-21.0.04}" \
+    --mempool "$use_mempool"
 }
 
 build_variant fastrpc ON
@@ -73,11 +84,11 @@ cp -f "$WORK_ROOT/LICENSE" "$ARTIFACT_ROOT/" 2>/dev/null || true
 {
   echo "upstream_url=$UPSTREAM_URL"
   echo "upstream_ref=$UPSTREAM_REF"
-  git -C "$WORK_ROOT" rev-parse HEAD | sed 's/^/upstream_commit=/'
+  echo "upstream_commit=$ACTUAL_UPSTREAM_COMMIT"
   echo "android_abi=arm64-v8a"
   echo "android_platform=android-34"
-  echo "hexagon_sdk_root=$HEXAGON_SDK_ROOT"
-  echo "hexagon_tools_root=$HEXAGON_TOOLS_ROOT"
+  echo "hexagon_sdk_version=${HEXAGON_SDK_VERSION:-6.7.0.0}"
+  echo "hexagon_tools_version=${HEXAGON_TOOLS_VERSION:-21.0.04}"
   echo "fastrpc=GGML_HEXAGON_USE_MEMPOOL=ON"
   echo "dspqueue=GGML_HEXAGON_USE_MEMPOOL=OFF"
 } > "$ARTIFACT_ROOT/BUILD-INFO.txt"

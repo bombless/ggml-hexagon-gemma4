@@ -7,6 +7,8 @@ on:
     paths:
       - '.github/workflows/hexagon-android.yml'
       - 'scripts/ci-build-hexagon.sh'
+      - 'scripts/validate-hexagon-artifacts.py'
+      - 'native/integration-design.md'
 
 permissions:
   contents: read
@@ -38,6 +40,11 @@ jobs:
           CMAKE_GENERATOR: Ninja
           CMAKE_BUILD_PARALLEL_LEVEL: '2'
         run: bash scripts/ci-build-hexagon.sh
+
+      - name: Verify isolated backend manifests
+        run: |
+          python3 -m json.tool artifacts/hexagon-android-arm64/fastrpc/manifest.json >/dev/null
+          python3 -m json.tool artifacts/hexagon-android-arm64/dspqueue/manifest.json >/dev/null
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
