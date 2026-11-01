@@ -33,7 +33,10 @@ if [[ -z "${HEXAGON_TOOLS_ROOT:-}" ]]; then
 fi
 [[ -d "$HEXAGON_TOOLS_ROOT" ]] || fail "Hexagon Tools not found: $HEXAGON_TOOLS_ROOT"
 
-export ANDROID_NDK_ROOT HEXAGON_SDK_ROOT HEXAGON_TOOLS_ROOT
+PREBUILT_LIB_DIR="${PREBUILT_LIB_DIR:-$HEXAGON_TOOLS_ROOT/Tools/target/hexagon/lib}"
+[[ -d "$PREBUILT_LIB_DIR" ]] || fail "Hexagon prebuilt library directory not found: $PREBUILT_LIB_DIR"
+
+export ANDROID_NDK_ROOT HEXAGON_SDK_ROOT HEXAGON_TOOLS_ROOT PREBUILT_LIB_DIR
 export ANDROID_NDK="$ANDROID_NDK_ROOT"
 export OPENCL_SDK_ROOT="${OPENCL_SDK_ROOT:-/tmp/opencl-sdk-not-used}"
 
@@ -56,7 +59,8 @@ build_variant() {
     -DGGML_HEXAGON=ON -DGGML_HEXAGON_USE_MEMPOOL="$use_mempool" \
     -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON \
     -DHEXAGON_SDK_ROOT="$HEXAGON_SDK_ROOT" \
-    -DHEXAGON_TOOLS_ROOT="$HEXAGON_TOOLS_ROOT"
+    -DHEXAGON_TOOLS_ROOT="$HEXAGON_TOOLS_ROOT" \\
+    -DPREBUILT_LIB_DIR="$PREBUILT_LIB_DIR"
   cmake --build "$build_dir" --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
   local dest="$ARTIFACT_ROOT/$name"
   mkdir -p "$dest/bin" "$dest/dsp"
@@ -78,6 +82,7 @@ cp -f "$WORK_ROOT/LICENSE" "$ARTIFACT_ROOT/" 2>/dev/null || true
   echo "android_platform=android-34"
   echo "hexagon_sdk_root=$HEXAGON_SDK_ROOT"
   echo "hexagon_tools_root=$HEXAGON_TOOLS_ROOT"
+  echo "prebuilt_lib_dir=$PREBUILT_LIB_DIR"
   echo "fastrpc=GGML_HEXAGON_USE_MEMPOOL=ON"
   echo "dspqueue=GGML_HEXAGON_USE_MEMPOOL=OFF"
 } > "$ARTIFACT_ROOT/BUILD-INFO.txt"
