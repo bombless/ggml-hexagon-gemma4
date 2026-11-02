@@ -55,6 +55,8 @@ To build **both isolated JNI APKs** on Windows, set `HEXAGON_SDK_ROOT` and `HEXA
 
 The script verifies the pinned upstream HEAD, clears only the generated `.cxx` native cache between transport builds, checks that each APK contains the JNI/AP Hexagon libraries and its matching HTP v75 DSP skeleton, and writes SHA-256-hashed APKs under `artifacts/apk/`. FastRPC additionally carries the upstream `ggml-hexagon.cfg`. DSP skeletons are APK assets, not arm64 JNI libraries; the app extracts them to its private runtime directory before HTP initialization. The APK packaging check is not a device smoke test.
 
+See [docs/htp-tiled-cache.md](docs/htp-tiled-cache.md) for the optional FastRPC Q4_0 preconversion sidecar workflow.
+
 ## Build the ggml-hexagon artifacts
 
 Run **Hexagon Android artifacts** from GitHub Actions, or execute bash scripts/ci-build-hexagon.sh in a compliant Linux environment with Android NDK, Qualcomm Hexagon SDK 6.7.0.0, and Hexagon Tools 21.0.04 installed. The workflow checks out upstream commit a5e6be5e032eaf22e6a1154e2b6ab34a76a13a8d and builds:

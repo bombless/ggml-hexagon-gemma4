@@ -1,0 +1,151 @@
+diff --git a/ggml/src/ggml-hexagon/ggml-hexagon-fastrpc.cpp b/ggml/src/ggml-hexagon/ggml-hexagon-fastrpc.cpp
+index 89f2f2fb3..bb1c26549 100644
+--- a/ggml/src/ggml-hexagon/ggml-hexagon-fastrpc.cpp
++++ b/ggml/src/ggml-hexagon/ggml-hexagon-fastrpc.cpp
+@@ -77,6 +77,7 @@
+ #include "ggml-alloc.h"
+ #include "ggml-common.h"
+ #include "ggml-hexagon.h"
++#include "htp-tiled-cache.h"
+ #include "ggml-impl.h"
+ #include "ggml-quants.h"
+ #include "htp/htp-ops.h"
+@@ -6866,6 +6867,91 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
+     }
+ 
+     if (is_repack) {
++        bool loaded_from_cache = false;
++        if (tensor->type == GGML_TYPE_Q4_0 && offset == 0 && size == ggml_nbytes(tensor)) {
++            struct TiledCacheState {
++                std::mutex mutex;
++                bool initialized = false;
++                bool valid = false;
++                std::ifstream file;
++                std::vector<htp_tiled_cache::Entry> entries;
++            };
++            static TiledCacheState cache;
++            std::lock_guard<std::mutex> cache_lock(cache.mutex);
++            if (!cache.initialized) {
++                cache.initialized = true;
++                const char * cache_path = std::getenv("GGML_HEXAGON_TILED_CACHE");
++                const char * expected_size = std::getenv("GGML_HEXAGON_TILED_CACHE_SOURCE_SIZE");
++                const char * expected_signature = std::getenv("GGML_HEXAGON_TILED_CACHE_SOURCE_SIGNATURE");
++                if (cache_path && expected_size && expected_signature) {
++                    const uint64_t source_size = std::strtoull(expected_size, nullptr, 10);
++                    const uint64_t source_signature = std::strtoull(expected_signature, nullptr, 10);
++                    cache.file.open(cache_path, std::ios::binary);
++                    htp_tiled_cache::Header header{};
++                    if (cache.file.read(reinterpret_cast<char *>(&header), sizeof(header)) &&
++                        std::memcmp(header.magic, htp_tiled_cache::MAGIC, sizeof(header.magic)) == 0 &&
++                        header.version == htp_tiled_cache::VERSION &&
++                        header.source_size == source_size && header.source_signature == source_signature &&
++                        header.entry_count <= 100000 && header.entries_offset >= sizeof(header) &&
++                        header.data_offset >= header.entries_offset +
++                            static_cast<uint64_t>(header.entry_count) * sizeof(htp_tiled_cache::Entry)) {
++                        cache.entries.resize(header.entry_count);
++                        cache.file.seekg(static_cast<std::streamoff>(header.entries_offset));
++                        const bool entries_read = header.entry_count == 0 || cache.file.read(
++                            reinterpret_cast<char *>(cache.entries.data()),
++                            static_cast<std::streamsize>(cache.entries.size() * sizeof(htp_tiled_cache::Entry)));
++                        if (entries_read) {
++                            cache.file.seekg(0, std::ios::end);
++                            const std::streamoff file_end = cache.file.tellg();
++                            bool ranges_valid = file_end >= 0;
++                            for (const auto & entry : cache.entries) {
++                                if (entry.offset < header.data_offset || entry.offset > static_cast<uint64_t>(file_end) ||
++                                    entry.size > static_cast<uint64_t>(file_end) - entry.offset) {
++                                    ranges_valid = false;
++                                    break;
++                                }
++                            }
++                            if (ranges_valid) {
++                                cache.valid = true;
++                                GGMLHEXAGON_LOG_INFO("[TILED_CACHE] opened %s entries=%u source_size=%llu", cache_path,
++                                    header.entry_count, (unsigned long long)header.source_size);
++                            }
++                        }
++                    }
++                    if (!cache.valid) {
++                        cache.file.close();
++                        cache.entries.clear();
++                        GGMLHEXAGON_LOG_WARN("[TILED_CACHE] invalid or stale cache %s; falling back to runtime repack", cache_path);
++                    }
++                }
++            }
++            if (cache.valid) {
++                for (const auto & entry : cache.entries) {
++                    if (std::strncmp(entry.name, tensor->name, sizeof(entry.name)) != 0 ||
++                        entry.type != static_cast<uint32_t>(tensor->type) ||
++                        entry.ne[0] != static_cast<uint64_t>(tensor->ne[0]) ||
++                        entry.ne[1] != static_cast<uint64_t>(tensor->ne[1]) ||
++                        entry.ne[2] != static_cast<uint64_t>(tensor->ne[2]) ||
++                        entry.ne[3] != static_cast<uint64_t>(tensor->ne[3])) {
++                        continue;
++                    }
++                    const uint64_t expected_size =
++                        ((static_cast<uint64_t>(tensor->ne[0]) + 31) / 32) *
++                        ((static_cast<uint64_t>(tensor->ne[1]) + 31) / 32) * 576 *
++                        static_cast<uint64_t>(tensor->ne[2]) * static_cast<uint64_t>(tensor->ne[3]);
++                    if (entry.size != expected_size || entry.offset > static_cast<uint64_t>(INT64_MAX)) break;
++                    cache.file.clear();
++                    cache.file.seekg(static_cast<std::streamoff>(entry.offset));
++                    if (cache.file.read(static_cast<char *>(tensor->data), static_cast<std::streamsize>(entry.size))) {
++                        loaded_from_cache = true;
++                        GGMLHEXAGON_LOG_DEBUG("[TILED_CACHE] hit name=%s bytes=%llu", tensor->name,
++                            (unsigned long long)entry.size);
++                    }
++                    break;
++                }
++            }
++        }
++        if (!loaded_from_cache) {
+         const char * dp                     = (const char *)tensor->data;
+         const char * base                   = (const char *)hctx->rpc_mempool;
+         const char * end                    = base + (ptrdiff_t)hctx->rpc_mempool_len;
+@@ -6988,6 +7074,7 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
+                 memcpy((char *)tensor->data + offset, data, size);
+                 break;
+         }
++        }
+     } else {
+         GGMLHEXAGON_LOG_DEBUG("[SET_TENSOR] #%llu name=%s type=%d(%s) ne=[%d,%d,%d,%d] nbytes=%zu is_repack=%d offset=%zu size=%zu\n",
+                                (unsigned long long)hctx->set_tensor_call_count, tensor->name, (int)tensor->type, ggml_type_name(tensor->type),
+diff --git a/ggml/src/ggml-hexagon/htp-tiled-cache.h b/ggml/src/ggml-hexagon/htp-tiled-cache.h
+new file mode 100644
+index 000000000..5a0b48f52
+--- /dev/null
++++ b/ggml/src/ggml-hexagon/htp-tiled-cache.h
+@@ -0,0 +1,32 @@
++#pragma once
++
++#include <cstdint>
++#include <cstddef>
++
++// On-disk sidecar format shared by the offline converter and FastRPC loader.
++// All offsets are absolute byte offsets from the beginning of the .htpbin file.
++namespace htp_tiled_cache {
++static constexpr char MAGIC[8] = { 'H', 'T', 'P', 'B', 'I', 'N', '0', '1' };
++static constexpr uint32_t VERSION = 1;
++static constexpr size_t NAME_CAPACITY = 256;
++
++#pragma pack(push, 1)
++struct Header {
++    char magic[8];
++    uint32_t version;
++    uint32_t entry_count;
++    uint64_t source_size;
++    uint64_t source_signature;
++    uint64_t entries_offset;
++    uint64_t data_offset;
++};
++
++struct Entry {
++    char name[NAME_CAPACITY];
++    uint32_t type;
++    uint64_t ne[4];
++    uint64_t offset;
++    uint64_t size;
++};
++#pragma pack(pop)
++}
+\ No newline at end of file

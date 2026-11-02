@@ -9,7 +9,9 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -88,6 +90,29 @@ void callback(JNIEnv * env, jobject listener, const char * method, const char * 
     }
     env->DeleteLocalRef(cls);
 }
+
+uint64_t tiledCacheSourceSignature(const std::string & path, uint64_t size) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return 0;
+    uint64_t hash = 1469598103934665603ULL;
+    auto feed = [&](const void * bytes, size_t count) {
+        const auto * p = static_cast<const uint8_t *>(bytes);
+        for (size_t i = 0; i < count; ++i) { hash ^= p[i]; hash *= 1099511628211ULL; }
+    };
+    feed(&size, sizeof(size));
+    constexpr size_t SAMPLE = 64 * 1024;
+    const size_t count = static_cast<size_t>(std::min<uint64_t>(size, SAMPLE));
+    std::vector<char> sample(count);
+    if (count && !file.read(sample.data(), static_cast<std::streamsize>(count))) return 0;
+    if (count) feed(sample.data(), count);
+    if (size > count) {
+        file.clear();
+        file.seekg(static_cast<std::streamoff>(size - count));
+        if (!file.read(sample.data(), static_cast<std::streamsize>(count))) return 0;
+        feed(sample.data(), count);
+    }
+    return hash;
+}
 }
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -115,6 +140,20 @@ Java_com_example_gemmaapp_engine_NativeLlamaSession_nativeCreate(
         };
         LOGI("LOAD_TIMING stage=nativeCreate_begin model=%s bytes=%lld context=%d threads=%d backend=%s",
              path.c_str(), static_cast<long long>(std::filesystem::file_size(path)), contextSize, threads, compiledBackend.c_str());
+        if (compiledBackend == "fastrpc-mempool") {
+            const uint64_t sourceSize = std::filesystem::file_size(path);
+            const uint64_t sourceSignature = tiledCacheSourceSignature(path, sourceSize);
+            if (sourceSignature != 0) {
+                const std::string cachePath = path + ".htpbin";
+                const std::string sizeText = std::to_string(sourceSize);
+                const std::string signatureText = std::to_string(sourceSignature);
+                setenv("GGML_HEXAGON_TILED_CACHE", cachePath.c_str(), 1);
+                setenv("GGML_HEXAGON_TILED_CACHE_SOURCE_SIZE", sizeText.c_str(), 1);
+                setenv("GGML_HEXAGON_TILED_CACHE_SOURCE_SIGNATURE", signatureText.c_str(), 1);
+                LOGI("[TILED_CACHE] candidate=%s source_signature=%llu present=%d", cachePath.c_str(),
+                     static_cast<unsigned long long>(sourceSignature), std::filesystem::exists(cachePath));
+            }
+        }
         auto stageStart = SteadyClock::now();
         static std::once_flag backendInit;
         std::call_once(backendInit, [] { llama_backend_init(); });
