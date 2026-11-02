@@ -31,6 +31,7 @@ struct Session {
     std::atomic<bool> cancelled{false};
     std::mutex operation;
     std::string backend;
+    int64_t modelLoadDurationMs = 0;
     ~Session() {
         if (sampler) llama_sampler_free(sampler);
         if (ctx) llama_free(ctx);
@@ -142,6 +143,8 @@ Java_com_example_gemmaapp_engine_NativeLlamaSession_nativeCreate(
         stageStart = SteadyClock::now();
         LOGI("LOAD_TIMING stage=model_load_begin");
         session->model = llama_model_load_from_file(path.c_str(), modelParams);
+        session->modelLoadDurationMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                SteadyClock::now() - stageStart).count();
         logStage("model_load", stageStart);
         if (!session->model) throw std::runtime_error("llama_model_load_from_file failed");
         if (!llama_model_chat_template(session->model, nullptr)) {
@@ -314,6 +317,12 @@ Java_com_example_gemmaapp_engine_NativeLlamaSession_nativeGenerate(
         }
     }
     callback(env, listener, "onComplete", s->cancelled.load() ? "cancelled" : "complete");
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_example_gemmaapp_engine_NativeLlamaSession_nativeModelLoadDurationMs(JNIEnv *, jobject, jlong handle) {
+    auto * s = reinterpret_cast<Session *>(handle);
+    return s ? static_cast<jlong>(s->modelLoadDurationMs) : 0;
 }
 
 extern "C" JNIEXPORT void JNICALL
