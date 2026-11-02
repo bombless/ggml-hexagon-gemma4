@@ -128,6 +128,9 @@ if (ggmlHexagonSource != null && ggmlHexagonBackend != "cpu") {
     tasks.matching { it.name == "mergeDebugAssets" }.configureEach {
         dependsOn("externalNativeBuildDebug")
     }
+    tasks.matching { it.name == "mergeReleaseAssets" }.configureEach {
+        dependsOn("externalNativeBuildRelease")
+    }
 }
 
 dependencies {

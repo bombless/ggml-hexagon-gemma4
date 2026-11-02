@@ -78,15 +78,15 @@ if (NOT GEMMA4_HEXAGON_BACKEND STREQUAL "cpu")
         message(FATAL_ERROR "Pinned Hexagon source is missing expected HTP target ${GEMMA4_HTP_V75_TARGET}")
     endif()
 
-    file(MAKE_DIRECTORY "${GEMMA4_HEXAGON_ASSET_DIR}/hexagon")
-    file(WRITE "${GEMMA4_HEXAGON_ASSET_DIR}/hexagon/backend.properties"
-        "backend=${GEMMA4_HEXAGON_BACKEND}\nupstream_commit=a5e6be5e032eaf22e6a1154e2b6ab34a76a13a8d\ndsp=HTP-v75\nabi=arm64-v8a\n")
-
-    # Use an ALL target rather than POST_BUILD on gemma4_jni: ExternalProject
-    # uses BUILD_ALWAYS, and the asset must be refreshed even when JNI itself
-    # is already up to date.
+    # Generate backend identity at build time, not configure time: AGP keeps
+    # separate CMake caches per transport but reuses one generated-assets folder.
+    # A build-time command prevents a stale backend.properties when switching APKs.
     add_custom_target(gemma4_stage_hexagon_assets ALL
         COMMAND ${CMAKE_COMMAND} -E make_directory "${GEMMA4_HEXAGON_ASSET_DIR}/hexagon/dsp"
+        COMMAND ${CMAKE_COMMAND}
+            -DOUTPUT=${GEMMA4_HEXAGON_ASSET_DIR}/hexagon/backend.properties
+            -DBACKEND=${GEMMA4_HEXAGON_BACKEND}
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/write-backend-properties.cmake"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${GEMMA4_HTP_V75_SOURCE}"
             "${GEMMA4_HEXAGON_ASSET_DIR}/hexagon/dsp/libggml-htp-v75.so"
@@ -105,9 +105,13 @@ if (NOT GEMMA4_HEXAGON_BACKEND STREQUAL "cpu")
             COMMENT "Staging FastRPC runtime configuration")
         add_dependencies(gemma4_jni gemma4_stage_fastrpc_config)
     else()
-        # AGP reuses this generated asset directory across transport variants.
-        # Remove any previous FastRPC cfg so it cannot leak into dspqueue APKs.
-        file(REMOVE "${GEMMA4_HEXAGON_ASSET_DIR}/hexagon/ap/ggml-hexagon.cfg")
-        add_dependencies(gemma4_jni gemma4_stage_hexagon_assets)
+        # Remove a previous FastRPC cfg at build time because AGP reuses the
+        # generated asset directory across transport-specific CMake caches.
+        add_custom_target(gemma4_remove_fastrpc_config ALL
+            COMMAND ${CMAKE_COMMAND} -E rm -f "${GEMMA4_HEXAGON_ASSET_DIR}/hexagon/ap/ggml-hexagon.cfg"
+            DEPENDS gemma4_stage_hexagon_assets
+            VERBATIM
+            COMMENT "Removing stale FastRPC config from dspqueue assets")
+        add_dependencies(gemma4_jni gemma4_remove_fastrpc_config)
     endif()
 endif()
