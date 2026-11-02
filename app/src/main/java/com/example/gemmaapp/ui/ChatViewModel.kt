@@ -4,7 +4,6 @@ import android.app.Application
 import android.app.ActivityManager
 import android.content.Context
 import android.util.Log
-import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.gemmaapp.engine.GemmaEngine
@@ -23,7 +22,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -235,18 +233,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     val modelLoadDurationMs = openedSession.modelLoadDurationMs
                     Log.i(TAG, "GGUF switch stage=native_open elapsedMs=${(System.nanoTime() - nativeStart) / 1_000_000} modelLoadMs=$modelLoadDurationMs totalMs=${(System.nanoTime() - switchStartNanos) / 1_000_000}")
-                    withContext(Dispatchers.Main) {
-                        val loadDurationText = if (modelLoadDurationMs >= 1_000L) {
-                            String.format(java.util.Locale.US, "%.1f 秒", modelLoadDurationMs / 1_000.0)
-                        } else {
-                            "$modelLoadDurationMs 毫秒"
-                        }
-                        Toast.makeText(
-                            getApplication<Application>(),
-                            "模型载入完成，llama_model_load_from_file() 耗时 $loadDurationText",
-                            Toast.LENGTH_LONG
-                        ).show()
+                    val loadDurationText = if (modelLoadDurationMs >= 1_000L) {
+                        String.format(java.util.Locale.US, "%.1f 秒", modelLoadDurationMs / 1_000.0)
+                    } else {
+                        "$modelLoadDurationMs 毫秒"
                     }
+                    publishSystemStatus("模型载入完成：llama_model_load_from_file() 耗时 $loadDurationText")
                     if (_engineMode.value != "GGUF") {
                         openedSession.close()
                         return@withLock
