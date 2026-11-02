@@ -64,9 +64,9 @@ object HexagonRuntimeAssets {
             }
         }
 
-        // Upstream hard-codes /data/local/tmp for Android cfg/runtime files. An APK asset
+        // The patched upstream loader uses /data/local/ggml-hexagon for Android runtime files. An APK asset
         // extracted to filesDir is NOT visible to the FastRPC/dspqueue skeleton loader.
-        val loaderDir = File("/data/local/tmp")
+        val loaderDir = File("/data/local/ggml-hexagon")
         val deployedSkeleton = File(loaderDir, SKELETON)
         check(deployedSkeleton.isFile && deployedSkeleton.length() == skeleton.length()) {
             "Matching HTP v75 skeleton is not deployed at ${deployedSkeleton.absolutePath}; run scripts/deploy-hexagon-runtime.ps1 with this APK first. APK asset extraction alone cannot satisfy file:/// loader paths."

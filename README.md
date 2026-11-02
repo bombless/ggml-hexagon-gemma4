@@ -47,7 +47,7 @@ For a Hexagon APK, deploy the matching DSP files before selecting GGUF:
     # or
     powershell -ExecutionPolicy Bypass -File scripts/deploy-hexagon-runtime.ps1 -Backend dspqueue -Apk artifacts/apk/gemma4-dspqueue-debug.apk
 
-The deployment script verifies APK backend/SoC-generation/ABI metadata and required AP `.so` entries, installs the APK (the Android linker-managed AP libraries), and pushes the matching `libggml-htp-v75.so` to `/data/local/tmp`; FastRPC additionally deploys its matching `ggml-hexagon.cfg`. Runtime startup checks the deployed DSP skeleton/config hashes against the APK assets and refuses a mismatched or missing bundle. This prevents stale cross-transport assets from being silently reused. It does not prove that HTP executed an operator: collect DSP/FastRPC diagnostics and run a deterministic prompt on the RMX3800 before claiming HTP inference.
+The deployment script verifies APK backend/SoC-generation/ABI metadata and required AP `.so` entries, installs the APK (the Android linker-managed AP libraries), and pushes the matching `libggml-htp-v75.so` to `/data/local/ggml-hexagon`; FastRPC additionally deploys its matching `ggml-hexagon.cfg`. Runtime startup checks the deployed DSP skeleton/config hashes against the APK assets and refuses a mismatched or missing bundle. This prevents stale cross-transport assets from being silently reused. It does not prove that HTP executed an operator: collect DSP/FastRPC diagnostics and run a deterministic prompt on the RMX3800 before claiming HTP inference.
 
 To build **both isolated JNI APKs** on Windows, set `HEXAGON_SDK_ROOT` and `HEXAGON_TOOLS_ROOT` (or let the SDK manifest resolve tools), then run:
 

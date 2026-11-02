@@ -43,6 +43,18 @@ git clone --filter=blob:none "$UPSTREAM_URL" "$WORK_ROOT"
 git -C "$WORK_ROOT" checkout --detach "$UPSTREAM_REF"
 ACTUAL_UPSTREAM_COMMIT="$(git -C "$WORK_ROOT" rev-parse HEAD)"
 [[ "$ACTUAL_UPSTREAM_COMMIT" == "$UPSTREAM_REF" ]] || fail "Checked out unexpected upstream commit: $ACTUAL_UPSTREAM_COMMIT"
+python3 - "$WORK_ROOT/ggml/src/ggml-hexagon/ggml-hexagon-fastrpc.cpp" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1])
+text = source.read_text()
+old = 'std::filesystem::path cfg_dir("/data/local/tmp");'
+new = 'std::filesystem::path cfg_dir("/data/local/ggml-hexagon");'
+if text.count(old) != 1:
+    raise SystemExit(f"Expected exactly one pinned FastRPC loader path in {source}")
+source.write_text(text.replace(old, new))
+PY
 printf 'Upstream revision: %s\n' "$ACTUAL_UPSTREAM_COMMIT"
 
 build_variant() {

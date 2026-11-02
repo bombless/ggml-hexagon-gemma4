@@ -18,8 +18,9 @@
 - Repository: https://github.com/ggml-hexagon/ggml-hexagon
 - Pinned branch: self-build-jz
 - Verified HEAD: a5e6be5e032eaf22e6a1154e2b6ab34a76a13a8d
-- Upstream working tree was clean and was not modified.
-- The CI script clones this exact commit into a temporary build directory; no large upstream tree is vendored in this repository.
+- Pinned upstream commit remains the immutable base. The Android FastRPC loader/config directory is locally patched from `/data/local/tmp` to `/data/local/ggml-hexagon`.
+- `scripts/ci-build-hexagon.sh` clones the exact pinned base and applies the same guarded one-occurrence source replacement before building, so CI artifacts and local builds use the same runtime path. This does not change the upstream base commit recorded in APK metadata.
+- The sibling upstream checkout contains the same loader-path change as a local commit on top of the pinned base.
 
 ## Licensing note
 
