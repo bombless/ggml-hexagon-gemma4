@@ -10,10 +10,14 @@ param(
 $ErrorActionPreference = "Stop"
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Upstream = (Resolve-Path $Upstream).Path
-$ExpectedCommit = "a5e6be5e032eaf22e6a1154e2b6ab34a76a13a8d"
+$AllowedCommits = @(
+    "a5e6be5e032eaf22e6a1154e2b6ab34a76a13a8d", # pinned upstream base
+    "14160d08bb789fdaa45c9f9a3c6abc41115bf4ab", # accepted follow-up commit
+    "bcdc7eeb441171ed0182701be3e01ea4769947ed"  # FastRPC repacking optimization
+)
 $ActualCommit = (& git -C $Upstream rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0 -or $ActualCommit -ne $ExpectedCommit) {
-    throw "Upstream checkout must be exactly $ExpectedCommit (found $ActualCommit)."
+if ($LASTEXITCODE -ne 0 -or $ActualCommit -notin $AllowedCommits) {
+    throw "Upstream checkout must be one of the allowed commits: $($AllowedCommits -join ', ') (found $ActualCommit)."
 }
 if ([string]::IsNullOrWhiteSpace($SdkRoot) -or !(Test-Path (Join-Path $SdkRoot "build\cmake\hexagon_arch.cmake"))) {
     throw "Set HEXAGON_SDK_ROOT to the licensed Qualcomm Hexagon SDK 6.7.0.0 installation."
