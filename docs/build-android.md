@@ -21,6 +21,12 @@ When iterating on Kotlin, build native outputs once and then package Kotlin chan
 
 Use `dspqueue` instead of `fastrpc-mempool` for the other transport. `-BuildStage native` and `-BuildStage kotlin` require an explicit `-OnlyBackend` because the two transports share generated APK/native output locations. `-BuildStage all` (the default) still builds and validates the APKs for both transports in one run.
 
+For a full native rebuild (rather than the default incremental CMake/Ninja build), pass `-ForceNativeRebuild` with the native stage. This removes `app/.cxx` before Gradle configures and compiles the native targets:
+
+    .\scripts\build-android-hexagon-apks.ps1 -OnlyBackend fastrpc-mempool -BuildStage native -ForceNativeRebuild
+
+The force option is accepted only with `-BuildStage native`.
+
 ## CI
 
 The Android app workflow builds the debug APK and runs JVM unit tests on a clean Ubuntu runner. The Hexagon Android artifacts workflow separately builds FastRPC+mempool and dspqueue from the pinned upstream source. Artifacts are separate by design.

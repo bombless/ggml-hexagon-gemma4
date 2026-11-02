@@ -3,7 +3,8 @@ param(
     [string]$SdkRoot = $env:HEXAGON_SDK_ROOT,
     [string]$Output = "artifacts\apk",
     [ValidateSet("all", "fastrpc-mempool", "dspqueue")][string]$OnlyBackend = "all",
-    [ValidateSet("all", "native", "kotlin")][string]$BuildStage = "all"
+    [ValidateSet("all", "native", "kotlin")][string]$BuildStage = "all",
+    [switch]$ForceNativeRebuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -51,6 +52,9 @@ if ($OnlyBackend -ne "all") { $Variants = @($Variants | Where-Object { $_.Name -
 if ($BuildStage -ne "all" -and $OnlyBackend -eq "all") {
     throw "BuildStage '$BuildStage' requires -OnlyBackend fastrpc-mempool or dspqueue. Build each transport separately so its native outputs cannot be overwritten by the other transport."
 }
+if ($ForceNativeRebuild -and $BuildStage -ne "native") {
+    throw "-ForceNativeRebuild can only be used with -BuildStage native."
+}
 
 Push-Location $Repo
 try {
@@ -67,6 +71,15 @@ try {
         switch ($BuildStage) {
             "native" {
                 Write-Host "Building C/C++ only; Kotlin and APK packaging are skipped."
+                if ($ForceNativeRebuild) {
+                    $NativeBuildCache = Join-Path $Repo "app\.cxx"
+                    if (Test-Path $NativeBuildCache) {
+                        Write-Host "Force rebuild requested; removing native CMake/Ninja cache: $NativeBuildCache"
+                        Remove-Item $NativeBuildCache -Recurse -Force
+                    } else {
+                        Write-Host "Force rebuild requested; no existing native cache found."
+                    }
+                }
                 & .\gradlew.bat @GradleArgs :app:externalNativeBuildDebug
                 if ($LASTEXITCODE -ne 0) { throw "Native build failed for $($Variant.Name)." }
             }
