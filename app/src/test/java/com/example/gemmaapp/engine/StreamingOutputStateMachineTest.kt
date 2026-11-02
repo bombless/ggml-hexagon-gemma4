@@ -39,4 +39,28 @@ class StreamingOutputStateMachineTest {
         assertEquals("text", parser.append("text<").visibleText)
         assertEquals("text<", parser.finish().visibleText)
     }
+
+    @Test
+    fun separatesGemma4ThoughtChannelFromFinalAnswer() {
+        val parser = StreamingOutputStateMachine()
+        val thought = parser.append("<|channel>thought\nLet me reason through this")
+        assertEquals("", thought.visibleText)
+        assertEquals("Let me reason through this", thought.thinkingText)
+
+        val answer = parser.append("<channel|><|channel>final\nThe answer is 42.")
+        assertEquals("The answer is 42.", answer.visibleText)
+        assertEquals("Let me reason through this", answer.thinkingText)
+
+        val finished = parser.finish()
+        assertEquals("The answer is 42.", finished.visibleText)
+        assertEquals("Let me reason through this", finished.thinkingText)
+    }
+
+    @Test
+    fun doesNotLeakIncompleteGemmaThoughtChannelIntoVisibleAnswer() {
+        val parser = StreamingOutputStateMachine()
+        val snapshot = parser.append("<|channel>thought\nprivate chain of thought")
+        assertEquals("", snapshot.visibleText)
+        assertEquals("private chain of thought", snapshot.thinkingText)
+    }
 }

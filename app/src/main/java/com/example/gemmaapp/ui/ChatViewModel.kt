@@ -449,19 +449,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _generationSpeed.value = 0f
         _generatedTokens.value = 0
         viewModelScope.launch(Dispatchers.IO) {
-            val output = StringBuilder()
+            // Keep GGUF presentation in sync with ONNX/QNN: raw llama.cpp pieces
+            // can contain Gemma channel markers and must not go straight to Markdown.
+            val streamParser = StreamingOutputStateMachine()
             val start = System.nanoTime()
             var tokenCount = 0
             var errorText: String? = null
             try {
                 session.generate(prompt, maxTokens = 768, listener = object : NativeLlamaSession.Listener {
                     override fun onToken(text: String) {
-                        output.append(text)
                         tokenCount++
                         val elapsed = ((System.nanoTime() - start) / 1_000_000_000.0).coerceAtLeast(0.001)
                         _generatedTokens.value = tokenCount
                         _generationSpeed.value = (tokenCount / elapsed).toFloat()
-                        updateLastMessage(output.toString())
+                        val snapshot = streamParser.append(text)
+                        updateLastMessage(
+                            newText = snapshot.visibleText,
+                            thinking = snapshot.thinkingText
+                        )
                     }
                     override fun onComplete(status: String) { Log.i(TAG, "GGUF generation complete: $status") }
                     override fun onError(message: String) { errorText = message }
@@ -471,9 +476,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 Log.e(TAG, "GGUF generation failed", error)
             } finally {
                 val duration = ((System.nanoTime() - start) / 1_000_000L).coerceAtLeast(1L)
-                val finalText = output.toString() + (errorText?.let { "\n[GGUF 错误] $it" } ?: "")
-                finishLastMessage(finalText, duration, tokenCount, tokenCount * 1000f / duration,
-                    thinking = "", toolCalls = emptyList())
+                // Release any trailing partial control-token prefix as literal text.
+                val finalSnapshot = streamParser.finish()
+                val finalText = finalSnapshot.visibleText +
+                    (errorText?.let { "\n[GGUF 错误] $it" } ?: "")
+                finishLastMessage(
+                    finalText,
+                    duration,
+                    tokenCount,
+                    tokenCount * 1000f / duration,
+                    thinking = finalSnapshot.thinkingText,
+                    toolCalls = emptyList()
+                )
                 _isGenerating.value = false
             }
         }
