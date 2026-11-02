@@ -48,30 +48,13 @@ try {
     $soc = (& $adb @adbArgs shell getprop ro.soc.model).Trim()
     if ($soc -and $soc -notmatch 'SM8650') { throw "Device SoC reports '$soc', expected SM8650" }
 
-    # Install the APK first so its AP-side JNI/llama/ggml .so set is installed atomically.
+    # The app owns the DSP runtime bundle and extracts it into Context.filesDir on GGUF initialization.
     & $adb @adbArgs install -r $Apk
     if ($LASTEXITCODE -ne 0) { throw 'adb install failed' }
-    $runtimeDir = '/data/local/ggml-hexagon'
-    & $adb @adbArgs shell mkdir -p $runtimeDir
-    if ($LASTEXITCODE -ne 0) { throw "Cannot prepare $runtimeDir" }
-    & $adb @adbArgs push $skeletonPath "$runtimeDir/libggml-htp-v75.so"
-    if ($LASTEXITCODE -ne 0) { throw 'Failed to deploy HTP v75 skeleton' }
-    if ($configPath) {
-        & $adb @adbArgs push $configPath "$runtimeDir/ggml-hexagon.cfg"
-        if ($LASTEXITCODE -ne 0) { throw 'Failed to deploy FastRPC config' }
-    } else {
-        & $adb @adbArgs shell rm -f "$runtimeDir/ggml-hexagon.cfg"
-    }
-    & $adb @adbArgs shell chmod 644 "$runtimeDir/libggml-htp-v75.so"
-    if ($configPath) { & $adb @adbArgs shell chmod 644 "$runtimeDir/ggml-hexagon.cfg" }
-    & $adb @adbArgs shell ls -l "$runtimeDir/libggml-htp-v75.so"
-    if ($LASTEXITCODE -ne 0) { throw 'HTP skeleton deployment verification failed' }
-    if ($configPath) {
-        & $adb @adbArgs shell ls -l "$runtimeDir/ggml-hexagon.cfg"
-        if ($LASTEXITCODE -ne 0) { throw 'FastRPC config deployment verification failed' }
-    }
-    Write-Host "Installed matched $Backend AP APK + HTP v75 skeleton. AP .so files remain APK-managed; DSP files are in $runtimeDir."
-    Write-Host 'This verifies deployment only, not successful DSP execution. Inspect logcat / DSP diagnostics after inference.'
+    & $adb @adbArgs shell monkey -p com.example.gemmaapp 1 | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'Could not launch the installed app' }
+    Write-Host "Installed matched $Backend APK. DSP skeleton/config are APK-managed and will be extracted to the app-private filesDir when GGUF initialization starts."
+    Write-Host 'App launch does not prove DSP loading; select a GGUF model and inspect GemmaHexagonRuntime / DSP diagnostics.'
     Write-Host ('AP ELF entries: ' + (($apEntries | ForEach-Object Name | Sort-Object -Unique) -join ', '))
 }
 finally {

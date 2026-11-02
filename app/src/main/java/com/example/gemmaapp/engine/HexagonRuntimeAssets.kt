@@ -23,8 +23,7 @@ object HexagonRuntimeAssets {
         check(compiled in setOf("fastrpc-mempool", "dspqueue")) { "Unsupported Hexagon artifact identity: $compiled" }
 
         val root = File(context.filesDir, "hexagon-runtime/$compiled")
-        val dspDir = File(root, "dsp")
-        check(dspDir.exists() || dspDir.mkdirs()) { "Cannot create DSP runtime directory: $dspDir" }
+        check(root.exists() || root.mkdirs()) { "Cannot create private Hexagon runtime directory: $root" }
         val metadata = context.assets.open("hexagon/backend.properties").bufferedReader().use { reader ->
             reader.readLines().mapNotNull { line ->
                 val key = line.substringBefore('=', "").trim()
@@ -38,25 +37,28 @@ object HexagonRuntimeAssets {
             "Unexpected ggml-hexagon upstream revision in APK: ${metadata["upstream_commit"]}"
         }
 
-        val skeleton = File(dspDir, SKELETON)
-        if (!skeleton.isFile || skeleton.length() == 0L) {
+        val skeleton = File(root, SKELETON)
+        run {
+            val temporary = File(root, "$SKELETON.tmp")
             context.assets.open("hexagon/dsp/$SKELETON").use { input ->
-                val temporary = File(dspDir, "$SKELETON.tmp")
                 temporary.outputStream().use { output -> input.copyTo(output) }
-                check(temporary.length() > 0L) { "Packaged HTP v75 skeleton is empty" }
-                check(temporary.renameTo(skeleton)) { "Cannot atomically install HTP v75 skeleton" }
             }
+            check(temporary.length() > 0L) { "Packaged HTP v75 skeleton is empty" }
+            if (skeleton.exists()) check(skeleton.delete()) { "Cannot replace stale HTP v75 skeleton" }
+            check(temporary.renameTo(skeleton)) { "Cannot atomically install HTP v75 skeleton" }
         }
         check(skeleton.isFile && skeleton.length() > 0L) { "HTP v75 skeleton is missing: $skeleton" }
 
-        val config = File(root, "ap/ggml-hexagon.cfg")
+        val config = File(root, "ggml-hexagon.cfg")
         if (compiled == "fastrpc-mempool") {
             check(config.parentFile!!.exists() || config.parentFile!!.mkdirs()) { "Cannot create FastRPC config directory" }
-            if (!config.isFile || config.length() == 0L) {
-                context.assets.open("hexagon/ap/ggml-hexagon.cfg").use { input ->
-                    config.outputStream().use { output -> input.copyTo(output) }
-                }
+            val temporaryConfig = File(root, "ggml-hexagon.cfg.tmp")
+            context.assets.open("hexagon/ap/ggml-hexagon.cfg").use { input ->
+                temporaryConfig.outputStream().use { output -> input.copyTo(output) }
             }
+            check(temporaryConfig.length() > 0L) { "Packaged FastRPC config is empty" }
+            if (config.exists()) check(config.delete()) { "Cannot replace stale FastRPC config" }
+            check(temporaryConfig.renameTo(config)) { "Cannot atomically install FastRPC config" }
             check(config.isFile && config.length() > 0L) { "FastRPC APK is missing its matching ggml-hexagon.cfg" }
         } else {
             check("ggml-hexagon.cfg" !in context.assets.list("hexagon/ap").orEmpty()) {
@@ -64,33 +66,17 @@ object HexagonRuntimeAssets {
             }
         }
 
-        // The patched upstream loader uses /data/local/ggml-hexagon for Android runtime files. An APK asset
-        // extracted to filesDir is NOT visible to the FastRPC/dspqueue skeleton loader.
-        val loaderDir = File("/data/local/ggml-hexagon")
-        val deployedSkeleton = File(loaderDir, SKELETON)
-        check(deployedSkeleton.isFile && deployedSkeleton.length() == skeleton.length()) {
-            "Matching HTP v75 skeleton is not deployed at ${deployedSkeleton.absolutePath}; run scripts/deploy-hexagon-runtime.ps1 with this APK first. APK asset extraction alone cannot satisfy file:/// loader paths."
-        }
-        if (compiled == "fastrpc-mempool") {
-            val deployedConfig = File(loaderDir, "ggml-hexagon.cfg")
-            check(deployedConfig.isFile && deployedConfig.length() > 0L) {
-                "FastRPC config is not deployed at ${deployedConfig.absolutePath}; run scripts/deploy-hexagon-runtime.ps1."
-            }
-            check(sha256(config) == sha256(deployedConfig)) {
-                "Deployed FastRPC config differs from this APK; redeploy the matching AP/DSP bundle."
-            }
-        }
+        // Both the DSP skeleton and (for FastRPC) its config live in this app-private bundle.
+        // Set this before loading the JNI/native backend; the native FastRPC loader reads it.
+        val loaderDir = root
         val adspPath = (listOf(loaderDir.absolutePath, "/vendor/dsp/cdsp", "/vendor/lib/rfsa/adsp",
             "/system/lib/rfsa/adsp", "/vendor/dsp/dsp", "/vendor/dsp/images", "/dsp")).joinToString(";")
         val ldPath = (listOf(loaderDir.absolutePath, "/vendor/dsp/cdsp", "/vendor/lib64",
             "/vendor/dsp/dsp", "/vendor/dsp/images")).joinToString(":")
+        Os.setenv("GGML_HEXAGON_RUNTIME_DIR", loaderDir.absolutePath, true)
         Os.setenv("ADSP_LIBRARY_PATH", adspPath, true)
         Os.setenv("LD_LIBRARY_PATH", ldPath, true)
-        check(sha256(skeleton) == sha256(deployedSkeleton)) {
-            "Deployed HTP v75 skeleton hash differs from this APK; redeploy the matching AP/DSP bundle."
-        }
-        Log.i(TAG, "Prepared matched backend=$compiled skeleton=${deployedSkeleton.absolutePath} bytes=${deployedSkeleton.length()} ADSP_LIBRARY_PATH=$adspPath")
-
+        Log.i(TAG, "Prepared app-private backend=$compiled skeleton=${skeleton.absolutePath} bytes=${skeleton.length()} GGML_HEXAGON_RUNTIME_DIR=${loaderDir.absolutePath} ADSP_LIBRARY_PATH=$adspPath")
         // Android's linker resolves the AP ELF dependency closure from nativeLibraryDir.
         val nativeDir = File(context.applicationInfo.nativeLibraryDir)
         val requiredAp = mutableListOf("libgemma4_jni.so", "libllama.so", "libggml.so", "libggml-base.so")
@@ -100,16 +86,4 @@ object HexagonRuntimeAssets {
         return RuntimeBundle(compiled, root, skeleton)
     }
 
-    private fun sha256(file: File): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        file.inputStream().use { input ->
-            val buffer = ByteArray(64 * 1024)
-            while (true) {
-                val count = input.read(buffer)
-                if (count < 0) break
-                digest.update(buffer, 0, count)
-            }
-        }
-        return digest.digest().joinToString("") { "%02x".format(it) }
-    }
 }

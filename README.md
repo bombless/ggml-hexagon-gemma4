@@ -47,13 +47,13 @@ For a Hexagon APK, deploy the matching DSP files before selecting GGUF:
     # or
     powershell -ExecutionPolicy Bypass -File scripts/deploy-hexagon-runtime.ps1 -Backend dspqueue -Apk artifacts/apk/gemma4-dspqueue-debug.apk
 
-The deployment script verifies APK backend/SoC-generation/ABI metadata and required AP `.so` entries, installs the APK (the Android linker-managed AP libraries), and pushes the matching `libggml-htp-v75.so` to `/data/local/ggml-hexagon`; FastRPC additionally deploys its matching `ggml-hexagon.cfg`. Runtime startup checks the deployed DSP skeleton/config hashes against the APK assets and refuses a mismatched or missing bundle. This prevents stale cross-transport assets from being silently reused. It does not prove that HTP executed an operator: collect DSP/FastRPC diagnostics and run a deterministic prompt on the RMX3800 before claiming HTP inference.
+The deployment script verifies APK backend/SoC-generation/ABI metadata and required AP `.so` entries, then installs the APK. On GGUF initialization, `HexagonRuntimeAssets` extracts the matching DSP skeleton (and FastRPC config, when applicable) into `Context.filesDir/hexagon-runtime/<backend>/` and sets the runtime search paths. This keeps the bundle app-owned and removes the need for root or shared-storage deployment. It does not prove that HTP executed an operator: collect DSP/FastRPC diagnostics and run a deterministic prompt on the RMX3800 before claiming HTP inference.
 
 To build **both isolated JNI APKs** on Windows, set `HEXAGON_SDK_ROOT` and `HEXAGON_TOOLS_ROOT` (or let the SDK manifest resolve tools), then run:
 
     powershell -ExecutionPolicy Bypass -File scripts/build-android-hexagon-apks.ps1
 
-The script verifies the pinned upstream HEAD, clears only the generated `.cxx` native cache between transport builds, checks that each APK contains the JNI/AP Hexagon libraries and its matching HTP v75 DSP skeleton, and writes SHA-256-hashed APKs under `artifacts/apk/`. FastRPC additionally carries the upstream `ggml-hexagon.cfg`. DSP skeletons are APK assets, not arm64 JNI libraries; they still require deployment to a Qualcomm-supported DSP loader location before HTP execution. The APK packaging check is not a device smoke test.
+The script verifies the pinned upstream HEAD, clears only the generated `.cxx` native cache between transport builds, checks that each APK contains the JNI/AP Hexagon libraries and its matching HTP v75 DSP skeleton, and writes SHA-256-hashed APKs under `artifacts/apk/`. FastRPC additionally carries the upstream `ggml-hexagon.cfg`. DSP skeletons are APK assets, not arm64 JNI libraries; the app extracts them to its private runtime directory before HTP initialization. The APK packaging check is not a device smoke test.
 
 ## Build the ggml-hexagon artifacts
 

@@ -50,7 +50,7 @@ import sys
 source = Path(sys.argv[1])
 text = source.read_text()
 old = 'std::filesystem::path cfg_dir("/data/local/tmp");'
-new = 'std::filesystem::path cfg_dir("/data/local/ggml-hexagon");'
+new = 'const char * runtime_dir = getenv("GGML_HEXAGON_RUNTIME_DIR");\n    std::filesystem::path cfg_dir = (runtime_dir && runtime_dir[0]) ? std::filesystem::path(runtime_dir) : std::filesystem::current_path();'
 if text.count(old) != 1:
     raise SystemExit(f"Expected exactly one pinned FastRPC loader path in {source}")
 source.write_text(text.replace(old, new))
