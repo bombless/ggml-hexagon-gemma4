@@ -1,4 +1,6 @@
 import java.util.concurrent.TimeUnit
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 
 plugins {
     id("com.android.application")
@@ -23,6 +25,8 @@ fun gitOutput(vararg command: String): String = runCatching {
 }.getOrDefault("unknown")
 
 val gitCommit = gitOutput("git", "rev-parse", "--short=12", "HEAD")
+val buildTimestamp = ZonedDateTime.now()
+    .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss XXX"))
 // Include untracked migrated sources too; otherwise a fresh migration checkout
 // could embed a misleading clean marker before its first commit.
 val gitDirty = gitOutput("git", "status", "--porcelain")
@@ -63,6 +67,7 @@ android {
         versionCode = 1
         versionName = "1.0"
         buildConfigField("String", "GIT_COMMIT", "\"$gitCommit\"")
+        buildConfigField("String", "BUILD_TIMESTAMP", "\"$buildTimestamp\"")
         buildConfigField("boolean", "GIT_DIRTY", gitDirty.toString())
         buildConfigField("String", "GGML_HEXAGON_BACKEND", "\"$ggmlHexagonBackend\"")
         buildConfigField("boolean", "GGML_JNI_ENABLED", (ggmlHexagonSource != null).toString())

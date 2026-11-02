@@ -6,8 +6,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -102,8 +104,20 @@ Java_com_example_gemmaapp_engine_NativeLlamaSession_nativeCreate(
         return 0;
     }
     try {
+        using SteadyClock = std::chrono::steady_clock;
+        const auto createStart = SteadyClock::now();
+        auto logStage = [&](const char * stage, SteadyClock::time_point stageStart) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(SteadyClock::now() - stageStart).count();
+            const auto total = std::chrono::duration_cast<std::chrono::milliseconds>(SteadyClock::now() - createStart).count();
+            LOGI("LOAD_TIMING stage=%s stage_ms=%lld total_ms=%lld backend=%s", stage,
+                 static_cast<long long>(elapsed), static_cast<long long>(total), compiledBackend.c_str());
+        };
+        LOGI("LOAD_TIMING stage=nativeCreate_begin model=%s bytes=%lld context=%d threads=%d backend=%s",
+             path.c_str(), static_cast<long long>(std::filesystem::file_size(path)), contextSize, threads, compiledBackend.c_str());
+        auto stageStart = SteadyClock::now();
         static std::once_flag backendInit;
         std::call_once(backendInit, [] { llama_backend_init(); });
+        logStage("backend_init", stageStart);
         auto session = std::make_unique<Session>();
         session->backend = requestedBackend;
         auto modelParams = llama_model_default_params();
@@ -125,26 +139,35 @@ Java_com_example_gemmaapp_engine_NativeLlamaSession_nativeCreate(
             modelParams.devices = selectedDevices.data();
             modelParams.n_gpu_layers = -1; // Request full layer offload; unsupported ops may still use CPU.
         }
+        stageStart = SteadyClock::now();
+        LOGI("LOAD_TIMING stage=model_load_begin");
         session->model = llama_model_load_from_file(path.c_str(), modelParams);
+        logStage("model_load", stageStart);
         if (!session->model) throw std::runtime_error("llama_model_load_from_file failed");
         if (!llama_model_chat_template(session->model, nullptr)) {
             throw std::runtime_error("GGUF does not contain tokenizer.chat_template; a model-specific template is required");
         }
         // Use llama-common's Jinja implementation. It also selects the
         // dedicated Gemma 4 renderer when the GGUF embeds the official template.
+        stageStart = SteadyClock::now();
         session->chatTemplates = common_chat_templates_init(session->model, "");
+        logStage("chat_template_init", stageStart);
         if (!session->chatTemplates) throw std::runtime_error("Failed to initialize GGUF chat templates");
         auto contextParams = llama_context_default_params();
         contextParams.n_ctx = static_cast<uint32_t>(contextSize);
         contextParams.n_batch = std::min<uint32_t>(contextSize, 512);
         contextParams.n_threads = threads;
         contextParams.n_threads_batch = threads;
+        stageStart = SteadyClock::now();
+        LOGI("LOAD_TIMING stage=context_init_begin n_ctx=%u n_batch=%u threads=%d", contextParams.n_ctx, contextParams.n_batch, threads);
         session->ctx = llama_init_from_model(session->model, contextParams);
+        logStage("context_init", stageStart);
         if (!session->ctx) throw std::runtime_error("llama_init_from_model failed");
         auto samplerParams = llama_sampler_chain_default_params();
         session->sampler = llama_sampler_chain_init(samplerParams);
         if (!session->sampler) throw std::runtime_error("sampler initialization failed");
         llama_sampler_chain_add(session->sampler, llama_sampler_init_greedy());
+        logStage("nativeCreate_total", createStart);
         return reinterpret_cast<jlong>(session.release());
     } catch (const std::exception & e) {
         LOGE("create failed: %s", e.what());

@@ -37,6 +37,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
@@ -51,7 +52,6 @@ fun ChatScreen(
 ) {
     val messages by viewModel.messages.collectAsState()
     val isGenerating by viewModel.isGenerating.collectAsState()
-    val backendStatus by viewModel.backendStatus.collectAsState()
     val engineMode by viewModel.engineMode.collectAsState()
     val generationSpeed by viewModel.generationSpeed.collectAsState()
     val generatedTokens by viewModel.generatedTokens.collectAsState()
@@ -59,6 +59,7 @@ fun ChatScreen(
     val isDownloadingModels by viewModel.isDownloadingModels.collectAsState()
     val modelDownloadFailed by viewModel.modelDownloadFailed.collectAsState()
     val isEngineReady by viewModel.isEngineReady.collectAsState()
+    val isLlamaModelLoading by viewModel.isLlamaModelLoading.collectAsState()
 
     var inputText by remember { mutableStateOf("") }
     var engineMenuExpanded by remember { mutableStateOf(false) }
@@ -66,6 +67,7 @@ fun ChatScreen(
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
+    val composeView = LocalView.current
     val recordingStopRequested = remember { AtomicBoolean(false) }
 
     fun beginVoiceRecording() {
@@ -142,6 +144,11 @@ fun ChatScreen(
         onDispose { recordingStopRequested.set(true) }
     }
 
+    DisposableEffect(composeView, isLlamaModelLoading) {
+        composeView.keepScreenOn = isLlamaModelLoading
+        onDispose { composeView.keepScreenOn = false }
+    }
+
     LaunchedEffect(
         messages.size,
         messages.lastOrNull()?.text?.length,
@@ -159,18 +166,12 @@ fun ChatScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
-                        Text(
-                            text = "Gemma 4 Android",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 18.sp
-                        )
-                        Text(
-                            text = backendStatus,
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                    Text(
+                        text = "Gemma 4 Android",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp,
+                        maxLines = 1
+                    )
                 },
                 actions = {
                     Box {
@@ -307,7 +308,6 @@ fun ChatScreen(
                             )
                         }
                         if (modelDownloadFailed) {
-                            Text(backendStatus, fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
                             TextButton(onClick = { viewModel.retryModelDownload() }) { Text("重试下载") }
                         }
                     }

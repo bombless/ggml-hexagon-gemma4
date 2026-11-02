@@ -1,6 +1,8 @@
 package com.example.gemmaapp.ui
 
 import android.app.Application
+import android.app.ActivityManager
+import android.content.Context
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -21,6 +23,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -28,7 +32,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         listOf(
             ChatMessage(
                 sender = ChatMessage.Sender.SYSTEM,
-                text = "欢迎使用 Gemma 4 掌上推理！基于 ONNX Runtime & Snapdragon 8 Gen 3 硬件加速。\n请输入问题开始对话。"
+                text = "构建时间：${BuildConfig.BUILD_TIMESTAMP}"
             )
         )
     )
@@ -43,9 +47,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _generatedTokens = MutableStateFlow(0)
     val generatedTokens: StateFlow<Int> = _generatedTokens.asStateFlow()
 
-    private val _backendStatus = MutableStateFlow("正在加载引擎与模型...")
-    val backendStatus: StateFlow<String> = _backendStatus.asStateFlow()
-
     private val _downloadProgress = MutableStateFlow<ModelDownloadProgress?>(null)
     val downloadProgress: StateFlow<ModelDownloadProgress?> = _downloadProgress.asStateFlow()
 
@@ -58,12 +59,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _isEngineReady = MutableStateFlow(false)
     val isEngineReady: StateFlow<Boolean> = _isEngineReady.asStateFlow()
 
+    private val _isLlamaModelLoading = MutableStateFlow(false)
+    val isLlamaModelLoading: StateFlow<Boolean> = _isLlamaModelLoading.asStateFlow()
+
     private var engine: GemmaEngine? = null
     private var ggufSession: NativeLlamaSession? = null
     private val _engineMode = MutableStateFlow("ONNX/QNN")
     val engineMode: StateFlow<String> = _engineMode.asStateFlow()
     private val javaScriptRuntime = JavaScriptToolRuntime()
     private var isLoadingEngine = false
+    // ONNX/QNN and llama.cpp both own process-wide HTP/FastRPC resources.
+    // Never initialize or destroy either runtime concurrently with the other.
+    private val engineLifecycleMutex = Mutex()
 
     private val toolSystemPrompt = """
         你是运行在 Android 手机上的 Gemma 编程助手。你可以通过 javascript 工具执行 JavaScript，并根据真实执行结果修复代码。
@@ -92,37 +99,58 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         isLoadingEngine = true
         Log.i(TAG, "Engine initialization started")
         viewModelScope.launch(Dispatchers.IO) {
-            try {
-                _modelDownloadFailed.value = false
-                _backendStatus.value = "检查本地模型文件..."
-                var found = GemmaEngine.findModelFiles(getApplication())
-                if (found == null) {
-                    _isDownloadingModels.value = true
-                    _backendStatus.value = "正在从 ModelScope 下载 Gemma 4 模型..."
-                    ModelScopeModelDownloader.download(getApplication()) { progress ->
-                        _downloadProgress.value = progress
+            engineLifecycleMutex.withLock {
+                try {
+                    if (_engineMode.value == "ONNX/QNN" && ggufSession == null) {
+                        initializeOnnxEngineLocked()
+                    } else {
+                        Log.i(TAG, "Skipping stale ONNX initialization after engine-mode change")
                     }
-                    found = GemmaEngine.findModelFiles(getApplication())
-                    if (found == null) throw IllegalStateException("模型下载完成，但未找到完整模型文件")
+                } finally {
+                    isLoadingEngine = false
                 }
-                _backendStatus.value = "正在初始化 QNN HTP / CPU 引擎..."
-                val eng = GemmaEngine.initialize(getApplication(), useQnnHtp = true)
-                engine = eng
-                _isEngineReady.value = true
-                _backendStatus.value = "运行后端: ${eng.backendName}"
-                Log.i(TAG, "Engine ready backend=${eng.backendName}")
-            } catch (e: Exception) {
-                Log.e(TAG, "Engine initialization failed", e)
-                _modelDownloadFailed.value = GemmaEngine.findModelFiles(getApplication()) == null
-                _backendStatus.value = if (_modelDownloadFailed.value) {
-                    "模型下载失败: ${e.message ?: "未知错误"}"
-                } else {
-                    "引擎初始化失败: ${e.message}"
-                }
-            } finally {
-                _isDownloadingModels.value = false
-                isLoadingEngine = false
             }
+        }
+    }
+
+    /** Caller must hold engineLifecycleMutex. */
+    private fun publishSystemStatus(status: String) {
+        _messages.value = _messages.value + ChatMessage(
+            sender = ChatMessage.Sender.SYSTEM,
+            text = status
+        )
+    }
+
+    private suspend fun initializeOnnxEngineLocked() {
+        try {
+            _modelDownloadFailed.value = false
+            publishSystemStatus("检查本地模型文件...")
+            var found = GemmaEngine.findModelFiles(getApplication())
+            if (found == null) {
+                _isDownloadingModels.value = true
+                publishSystemStatus("正在从 ModelScope 下载 Gemma 4 模型...")
+                ModelScopeModelDownloader.download(getApplication()) { progress ->
+                    _downloadProgress.value = progress
+                }
+                found = GemmaEngine.findModelFiles(getApplication())
+                if (found == null) throw IllegalStateException("模型下载完成，但未找到完整模型文件")
+            }
+            publishSystemStatus("正在初始化 QNN HTP / CPU 引擎...")
+            val eng = GemmaEngine.initialize(getApplication(), useQnnHtp = true)
+            engine = eng
+            _isEngineReady.value = true
+            publishSystemStatus("引擎已就绪，运行后端：${eng.backendName}")
+            Log.i(TAG, "Engine ready backend=${eng.backendName}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Engine initialization failed", e)
+            _modelDownloadFailed.value = GemmaEngine.findModelFiles(getApplication()) == null
+            publishSystemStatus(if (_modelDownloadFailed.value) {
+                "模型下载失败: ${e.message ?: "未知错误"}"
+            } else {
+                "引擎初始化失败: ${e.message}"
+            })
+        } finally {
+            _isDownloadingModels.value = false
         }
     }
 
@@ -132,18 +160,34 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun useOnnxEngine() {
         if (_isGenerating.value) return
-        ggufSession?.close()
-        ggufSession = null
         _engineMode.value = "ONNX/QNN"
-        if (engine == null) loadEngine()
-        else _backendStatus.value = "运行后端: ${engine?.backendName ?: "ONNX/QNN"}"
+        viewModelScope.launch(Dispatchers.IO) {
+            engineLifecycleMutex.withLock {
+                try {
+                    ggufSession?.close()
+                    ggufSession = null
+                    _engineMode.value = "ONNX/QNN"
+                    if (engine == null) {
+                        isLoadingEngine = true
+                        initializeOnnxEngineLocked()
+                    } else {
+                        publishSystemStatus("已切换到 ONNX/QNN，引擎后端：${engine?.backendName ?: "ONNX/QNN"}")
+                    }
+                } finally {
+                    isLoadingEngine = false
+                }
+            }
+        }
     }
 
     fun useGgufEngine() {
         if (_isGenerating.value) return
+        _engineMode.value = "GGUF"
         viewModelScope.launch(Dispatchers.IO) {
-            try {
-                _backendStatus.value = "检查 GGUF / ${BuildConfig.GGML_HEXAGON_BACKEND} 运行时..."
+            engineLifecycleMutex.withLock {
+              try {
+                val switchStartNanos = System.nanoTime()
+                publishSystemStatus("检查 GGUF / ${BuildConfig.GGML_HEXAGON_BACKEND} 运行时...")
                 val modelDirs = listOfNotNull(
                     getApplication<Application>().getExternalFilesDir(null)?.let { File(it, "models") },
                     File(getApplication<Application>().filesDir, "models")
@@ -155,26 +199,64 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     .sortedBy { it.name }
                     .firstOrNull()
                     ?: throw IllegalStateException("未找到 GGUF。请将 .gguf 模型文件放入 ${modelDirs.first().absolutePath}/")
+                Log.i(TAG, "GGUF switch model=${model.name} bytes=${model.length()} path=${model.absolutePath}")
                 if (ggufSession == null) {
-                    // Must run before NativeLlamaSession initializes System.loadLibrary().
-                    HexagonRuntimeAssets.prepare(getApplication(), BuildConfig.GGML_HEXAGON_BACKEND)
-                    val openedSession = NativeLlamaSession.open(model, contextSize = 4096, threads = 4,
-                        backend = BuildConfig.GGML_HEXAGON_BACKEND)
-                    // Avoid keeping both large inference runtimes resident on a phone.
+                    // Tear down QNN before llama_backend_init() opens HTP and reserves
+                    // the FastRPC mempool. Closing it after model load is too late.
+                    publishSystemStatus("正在释放 ONNX/QNN 资源...")
+                    val closeStart = System.nanoTime()
                     engine?.close()
+                    Log.i(TAG, "GGUF switch stage=onnx_close elapsedMs=${(System.nanoTime() - closeStart) / 1_000_000}")
                     engine = null
+                    _isEngineReady.value = false
+                    // Must run before NativeLlamaSession initializes System.loadLibrary().
+                    publishSystemStatus("正在准备 Hexagon / FastRPC 运行时...")
+                    val assetsStart = System.nanoTime()
+                    HexagonRuntimeAssets.prepare(getApplication(), BuildConfig.GGML_HEXAGON_BACKEND)
+                    Log.i(TAG, "GGUF switch stage=runtime_assets elapsedMs=${(System.nanoTime() - assetsStart) / 1_000_000}")
+                    val memoryInfo = ActivityManager.MemoryInfo()
+                    val activityManager = getApplication<Application>()
+                        .getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                    activityManager.getMemoryInfo(memoryInfo)
+                    val availableMiB = memoryInfo.availMem / (1024L * 1024L)
+                    val totalMiB = memoryInfo.totalMem / (1024L * 1024L)
+                    publishSystemStatus("即将调用 llama_model_load_from_file：系统当前可用空闲内存 ${availableMiB} MiB / ${totalMiB} MiB" +
+                        if (memoryInfo.lowMemory) "（系统已处于低内存状态）" else "")
+                    publishSystemStatus("正在加载 GGUF 权重（${model.length() / (1024 * 1024)} MiB），首次加载可能需要几分钟...")
+                    val nativeStart = System.nanoTime()
+                    _isLlamaModelLoading.value = true
+                    val openedSession = try {
+                        NativeLlamaSession.open(model, contextSize = 4096, threads = 4,
+                            backend = BuildConfig.GGML_HEXAGON_BACKEND)
+                    } finally {
+                        _isLlamaModelLoading.value = false
+                    }
+                    Log.i(TAG, "GGUF switch stage=native_open elapsedMs=${(System.nanoTime() - nativeStart) / 1_000_000} totalMs=${(System.nanoTime() - switchStartNanos) / 1_000_000}")
+                    if (_engineMode.value != "GGUF") {
+                        openedSession.close()
+                        return@withLock
+                    }
                     ggufSession = openedSession
                 }
+                if (_engineMode.value != "GGUF") return@withLock
                 _engineMode.value = "GGUF"
                 _isEngineReady.value = true
-                _backendStatus.value = "GGUF: ${model.name} · ${BuildConfig.GGML_HEXAGON_BACKEND}"
+                publishSystemStatus("GGUF 引擎已就绪：${model.name} · ${BuildConfig.GGML_HEXAGON_BACKEND}")
+                Log.i(TAG, "GGUF switch complete totalMs=${(System.nanoTime() - switchStartNanos) / 1_000_000}")
                 _messages.value = _messages.value + ChatMessage(sender = ChatMessage.Sender.SYSTEM,
                     text = "已切换到 GGUF 引擎。语音输入和 JavaScript 工具目前仅由 ONNX/QNN 路径提供。")
             } catch (error: Throwable) {
                 Log.e(TAG, "GGUF engine initialization failed", error)
-                _backendStatus.value = "GGUF 初始化失败: ${error.message}"
+                _engineMode.value = "ONNX/QNN"
+                if (engine == null && ggufSession == null) {
+                    isLoadingEngine = true
+                    initializeOnnxEngineLocked()
+                    isLoadingEngine = false
+                }
+                publishSystemStatus("GGUF 初始化失败: ${error.message}")
                 _messages.value = _messages.value + ChatMessage(sender = ChatMessage.Sender.SYSTEM,
                     text = "GGUF 引擎未切换：${error.message ?: error.javaClass.simpleName}")
+              }
             }
         }
     }
