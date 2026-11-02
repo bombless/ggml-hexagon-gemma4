@@ -25,6 +25,10 @@ The migrated app currently runs ONNX graphs through ONNX Runtime. QNN HTP is the
 
 AP-side shared libraries execute on Android ARM64. The HTP skeleton executes on the DSP through the selected RPC transport. The two backend variants must be packaged and deployed as matched sets. The JNI session currently implements llama model/context/sampler ownership, prompt tokenization, decode, token callbacks, cancellation, and close. CMake/Gradle select `cpu`, `fastrpc-mempool`, or `dspqueue`; Hexagon builds enable `GGML_HEXAGON`, which registers the upstream `HTP` backend in ggml. JNI selects the first registered HTP device and requests layer offload. Licensed SDK builds, matched deployment, and proof of actual DSP execution remain pending.
 
+The JavaScript tool runtime is application-level rather than a llama.cpp feature: both inference paths use the same Rhino sandbox and Gemma tool-call parser/orchestration. The GGUF JNI layer renders structured system/user/assistant/tool messages through the model's embedded Jinja template, so tool calls and tool results remain separate conversation turns. Tool execution remains sandboxed from Android/Java classes, files, and network access.
+
+Voice input shares the same PCM recorder and Gemma 4 audio frontend across both backends. ONNX/QNN runs the audio encoder and injects its soft-token embeddings into the ONNX decoder. GGUF runs the same audio encoder in a standalone CPU ONNX session, then JNI replaces each `<|audio|>` placeholder with its corresponding 1536-wide embedding using `llama_batch.embd` before llama.cpp decoding. This avoids a dependency on `libmtmd` (which is absent from the pinned ggml-hexagon checkout); device-level parity of the ONNX-produced embeddings with the GGUF decoder still needs validation.
+
 ## Remaining integration and acceptance work
 
 1. Connect the optional native session to the app's user-facing inference selection without replacing the working ONNX/QNN engine prematurely.

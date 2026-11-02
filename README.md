@@ -39,7 +39,7 @@ Build the optional JNI APK (CPU-only llama path):
 
     ./gradlew.bat :app:assembleDebug -PggmlHexagonSource=D:/mcp-agent-workspace/ggml-hexagon -PggmlHexagonBackend=cpu
 
-For HTP, build one of the two transport-specific APKs with the licensed SDK using the commands above. Put `gemma-4-E2B-it-Q4_0.gguf` in the app's external files `models/` directory (or private `files/models/`); the app does not download or package GGUF weights. Select **GGUF / llama.cpp** from the chat toolbar. The GGUF path uses the model's embedded chat template and token streaming. Audio input and the JavaScript tool loop remain on the ONNX/QNN path; switch back to ONNX/QNN to use them.
+For HTP, build one of the two transport-specific APKs with the licensed SDK using the commands above. Put `gemma-4-E2B-it-Q4_0.gguf` in the app's external files `models/` directory (or private `files/models/`); the app does not download or package GGUF weights. Select **GGUF / llama.cpp** from the chat toolbar. The GGUF path uses the model's embedded chat template, token streaming, and the shared sandboxed JavaScript tool loop. Its microphone button records PCM, runs the existing Gemma 4 ONNX audio encoder on CPU, and injects the resulting soft-token embeddings at `<|audio|>` positions in the llama.cpp prompt. The same direct Gemma audio input is available in both GGUF and ONNX/QNN modes.
 
 For a Hexagon APK, deploy the matching DSP files before selecting GGUF:
 

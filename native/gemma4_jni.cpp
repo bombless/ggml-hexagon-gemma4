@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -220,23 +221,77 @@ Java_com_example_gemmaapp_engine_NativeLlamaSession_nativeCreate(
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_example_gemmaapp_engine_NativeLlamaSession_nativeGenerate(
-        JNIEnv * env, jobject, jlong handle, jstring promptValue, jint maxTokens, jobject listener) {
+        JNIEnv * env, jobject, jlong handle, jobjectArray roleValues,
+        jobjectArray contentValues, jobjectArray toolNameValues,
+        jfloatArray audioEmbeddingsValue, jint audioRows,
+        jint audioDimension, jint maxTokens, jobject listener) {
     auto * s = reinterpret_cast<Session *>(handle);
-    if (!s || !listener || maxTokens < 1 || maxTokens > 4096) {
+    if (!s || !listener || !roleValues || !contentValues || !toolNameValues || maxTokens < 1 || maxTokens > 4096) {
         throwJava(env, "Invalid session, listener, or token limit"); return;
+    }
+    const jsize messageCount = env->GetArrayLength(roleValues);
+    if (messageCount < 1 || messageCount > 256 ||
+        env->GetArrayLength(contentValues) != messageCount ||
+        env->GetArrayLength(toolNameValues) != messageCount) {
+        callback(env, listener, "onError", "Invalid chat message arrays");
+        return;
     }
     std::lock_guard<std::mutex> lock(s->operation);
     s->cancelled.store(false);
-    const std::string userPrompt = fromJava(env, promptValue);
+    std::vector<float> audioEmbeddings;
+    if (audioRows < 0 || audioDimension < 0) {
+        callback(env, listener, "onError", "Invalid audio embedding dimensions");
+        return;
+    }
+    if (audioRows > 0) {
+        if (!audioEmbeddingsValue || audioDimension != llama_model_n_embd_inp(s->model)) {
+            callback(env, listener, "onError", "Audio embedding width does not match the GGUF model embedding size");
+            return;
+        }
+        const int64_t expected = static_cast<int64_t>(audioRows) * audioDimension;
+        if (expected <= 0 || expected > std::numeric_limits<jsize>::max() ||
+            env->GetArrayLength(audioEmbeddingsValue) != static_cast<jsize>(expected)) {
+            callback(env, listener, "onError", "Audio embedding buffer length does not match rows × embedding width");
+            return;
+        }
+        audioEmbeddings.resize(static_cast<size_t>(expected));
+        env->GetFloatArrayRegion(audioEmbeddingsValue, 0, static_cast<jsize>(expected), audioEmbeddings.data());
+        if (env->ExceptionCheck()) return;
+    } else if (audioEmbeddingsValue && env->GetArrayLength(audioEmbeddingsValue) != 0) {
+        callback(env, listener, "onError", "Audio embeddings were supplied without audio rows");
+        return;
+    }
     // Render the GGUF's actual Jinja template instead of the limited legacy
     // llama_chat_apply_template() heuristic formatter.
     std::string prompt;
     try {
         common_chat_templates_inputs inputs;
-        common_chat_msg message;
-        message.role = "user";
-        message.content = userPrompt;
-        inputs.messages.push_back(std::move(message));
+        inputs.messages.reserve(static_cast<size_t>(messageCount));
+        for (jsize i = 0; i < messageCount; ++i) {
+            jobject roleObject = env->GetObjectArrayElement(roleValues, i);
+            jobject contentObject = env->GetObjectArrayElement(contentValues, i);
+            jobject toolNameObject = env->GetObjectArrayElement(toolNameValues, i);
+            if (!roleObject || !contentObject) {
+                if (roleObject) env->DeleteLocalRef(roleObject);
+                if (contentObject) env->DeleteLocalRef(contentObject);
+                if (toolNameObject) env->DeleteLocalRef(toolNameObject);
+                callback(env, listener, "onError", "Chat messages must have a role and content");
+                return;
+            }
+            common_chat_msg message;
+            message.role = fromJava(env, reinterpret_cast<jstring>(roleObject));
+            message.content = fromJava(env, reinterpret_cast<jstring>(contentObject));
+            message.tool_name = fromJava(env, reinterpret_cast<jstring>(toolNameObject));
+            env->DeleteLocalRef(roleObject);
+            env->DeleteLocalRef(contentObject);
+            if (toolNameObject) env->DeleteLocalRef(toolNameObject);
+            if (env->ExceptionCheck()) return;
+            if (message.role.empty()) {
+                callback(env, listener, "onError", "Chat message role cannot be empty");
+                return;
+            }
+            inputs.messages.push_back(std::move(message));
+        }
         inputs.add_generation_prompt = true;
         inputs.use_jinja = true;
         prompt = common_chat_templates_apply(s->chatTemplates.get(), inputs).prompt.str();
@@ -251,16 +306,63 @@ Java_com_example_gemmaapp_engine_NativeLlamaSession_nativeGenerate(
     }
     llama_memory_clear(llama_get_memory(s->ctx), true);
     const auto * vocab = llama_model_get_vocab(s->model);
-    std::vector<llama_token> tokens(std::max<size_t>(prompt.size() + 8, 32));
-    int32_t count = llama_tokenize(vocab, prompt.c_str(), static_cast<int32_t>(prompt.size()),
-                                   tokens.data(), static_cast<int32_t>(tokens.size()), true, true);
-    if (count < 0) {
-        tokens.resize(static_cast<size_t>(-count));
-        count = llama_tokenize(vocab, prompt.c_str(), static_cast<int32_t>(prompt.size()),
-                               tokens.data(), static_cast<int32_t>(tokens.size()), true, true);
+    std::vector<llama_token> tokens;
+    std::vector<uint8_t> audioMask;
+    auto appendTextTokens = [&](const std::string & text, bool addSpecial) -> bool {
+        if (text.empty()) return true;
+        std::vector<llama_token> part(std::max<size_t>(text.size() + 8, 32));
+        int32_t n = llama_tokenize(vocab, text.c_str(), static_cast<int32_t>(text.size()),
+                                   part.data(), static_cast<int32_t>(part.size()), addSpecial, true);
+        if (n < 0) {
+            part.resize(static_cast<size_t>(-n));
+            n = llama_tokenize(vocab, text.c_str(), static_cast<int32_t>(text.size()),
+                               part.data(), static_cast<int32_t>(part.size()), addSpecial, true);
+        }
+        if (n < 0) return false;
+        part.resize(static_cast<size_t>(n));
+        tokens.insert(tokens.end(), part.begin(), part.end());
+        audioMask.insert(audioMask.end(), part.size(), 0);
+        return true;
+    };
+
+    if (audioRows > 0) {
+        // Do not ask the GGUF tokenizer to encode <|audio|>: some Gemma 4
+        // conversions omit that marker from the text vocabulary entirely.
+        // Split the rendered chat prompt around the marker and insert one
+        // embedding slot directly into the decode sequence for each row.
+        const std::string audioMarker = "<|audio|>";
+        size_t cursor = 0;
+        int32_t markerCount = 0;
+        bool addSpecial = true;
+        while (true) {
+            const size_t marker = prompt.find(audioMarker, cursor);
+            const std::string text = prompt.substr(cursor,
+                    marker == std::string::npos ? std::string::npos : marker - cursor);
+            if (!appendTextTokens(text, addSpecial)) {
+                callback(env, listener, "onError", "Prompt segment tokenization failed");
+                return;
+            }
+            addSpecial = false;
+            if (marker == std::string::npos) break;
+            tokens.push_back(-1); // sentinel; never passed to llama_decode as a token
+            audioMask.push_back(1);
+            ++markerCount;
+            cursor = marker + audioMarker.size();
+        }
+        if (markerCount != audioRows) {
+            const std::string error = "Audio placeholder count " + std::to_string(markerCount) +
+                    " does not match encoded audio rows " + std::to_string(audioRows);
+            callback(env, listener, "onError", error.c_str());
+            return;
+        }
+    } else {
+        if (!appendTextTokens(prompt, true)) {
+            callback(env, listener, "onError", "Prompt tokenization failed");
+            return;
+        }
     }
+    const int32_t count = static_cast<int32_t>(tokens.size());
     if (count <= 0) { callback(env, listener, "onError", "Prompt tokenization failed"); return; }
-    tokens.resize(static_cast<size_t>(count));
     const uint32_t nCtx = llama_n_ctx(s->ctx);
     const uint32_t nBatch = llama_n_batch(s->ctx);
     LOGE("Prompt prepared: chars=%zu tokens=%d n_ctx=%u n_batch=%u backend=%s",
@@ -272,22 +374,37 @@ Java_com_example_gemmaapp_engine_NativeLlamaSession_nativeGenerate(
         return;
     }
 
-    // llama_decode() accepts at most n_batch tokens per call. A full prompt
-    // can be longer than that, so feed it in contiguous chunks while keeping
-    // absolute KV positions and requesting logits only for the final token.
+    // Feed contiguous text/audio runs in order. Audio slots are inserted
+    // between tokenized text segments and do not require a tokenizer token ID.
     int result = 0;
+    int32_t audioRow = 0;
     for (int32_t offset = 0; offset < count; ) {
-        const int32_t chunkSize = std::min<int32_t>(count - offset,
-                static_cast<int32_t>(nBatch));
-        llama_batch batch = llama_batch_init(chunkSize, 0, 1);
-        if (!batch.token || !batch.pos || !batch.n_seq_id || !batch.seq_id || !batch.logits) {
+        const bool embeddingRun = audioMask[static_cast<size_t>(offset)] != 0;
+        int32_t chunkSize = 0;
+        while (offset + chunkSize < count && chunkSize < static_cast<int32_t>(nBatch)) {
+            const bool nextIsEmbedding = audioMask[static_cast<size_t>(offset + chunkSize)] != 0;
+            if (nextIsEmbedding != embeddingRun) break;
+            ++chunkSize;
+        }
+
+        llama_batch batch = llama_batch_init(chunkSize, embeddingRun ? audioDimension : 0, 1);
+        const bool batchReady = (embeddingRun ? batch.embd != nullptr : batch.token != nullptr) &&
+                batch.pos && batch.n_seq_id && batch.seq_id && batch.logits;
+        if (!batchReady) {
             llama_batch_free(batch);
             callback(env, listener, "onError", "Failed to allocate prompt decode batch");
             return;
         }
         for (int32_t i = 0; i < chunkSize; ++i) {
             const int32_t tokenIndex = offset + i;
-            batch.token[i] = tokens[static_cast<size_t>(tokenIndex)];
+            if (embeddingRun) {
+                const float * source = audioEmbeddings.data() +
+                        static_cast<size_t>(audioRow + i) * static_cast<size_t>(audioDimension);
+                std::copy_n(source, audioDimension,
+                        batch.embd + static_cast<size_t>(i) * static_cast<size_t>(audioDimension));
+            } else {
+                batch.token[i] = tokens[static_cast<size_t>(tokenIndex)];
+            }
             batch.pos[i] = tokenIndex;
             batch.n_seq_id[i] = 1;
             batch.seq_id[i][0] = 0;
@@ -297,15 +414,20 @@ Java_com_example_gemmaapp_engine_NativeLlamaSession_nativeGenerate(
         result = llama_decode(s->ctx, batch);
         llama_batch_free(batch);
         if (result != 0) {
-            LOGE("Prompt decode failed: rc=%d offset=%d chunk=%d total=%d n_ctx=%u n_batch=%u backend=%s",
-                 result, offset, chunkSize, count, nCtx, nBatch, s->backend.c_str());
+            LOGE("Prompt decode failed: rc=%d offset=%d chunk=%d total=%d audio_run=%d n_ctx=%u n_batch=%u backend=%s",
+                 result, offset, chunkSize, count, embeddingRun, nCtx, nBatch, s->backend.c_str());
             const std::string error = "Prompt decode failed (llama_decode rc=" +
                     std::to_string(result) + ", tokens=" + std::to_string(count) +
                     ", n_batch=" + std::to_string(nBatch) + ")";
             callback(env, listener, "onError", error.c_str());
             return;
         }
+        if (embeddingRun) audioRow += chunkSize;
         offset += chunkSize;
+    }
+    if (audioRow != audioRows) {
+        callback(env, listener, "onError", "Not all audio embeddings were consumed by prompt decoding");
+        return;
     }
 
     std::vector<char> piece(4096);

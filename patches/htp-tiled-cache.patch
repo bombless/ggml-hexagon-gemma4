@@ -1,5 +1,5 @@
 diff --git a/ggml/src/ggml-hexagon/ggml-hexagon-fastrpc.cpp b/ggml/src/ggml-hexagon/ggml-hexagon-fastrpc.cpp
-index 89f2f2fb3..bb1c26549 100644
+index 89f2f2fb3..ea58c33d3 100644
 --- a/ggml/src/ggml-hexagon/ggml-hexagon-fastrpc.cpp
 +++ b/ggml/src/ggml-hexagon/ggml-hexagon-fastrpc.cpp
 @@ -77,6 +77,7 @@
@@ -10,12 +10,18 @@ index 89f2f2fb3..bb1c26549 100644
  #include "ggml-impl.h"
  #include "ggml-quants.h"
  #include "htp/htp-ops.h"
-@@ -6866,6 +6867,91 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
+@@ -6866,6 +6867,98 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
      }
  
      if (is_repack) {
 +        bool loaded_from_cache = false;
-+        if (tensor->type == GGML_TYPE_Q4_0 && offset == 0 && size == ggml_nbytes(tensor)) {
++        const bool cacheable_type = tensor->type == GGML_TYPE_Q4_0 || tensor->type == GGML_TYPE_Q4_1 ||
++                                    tensor->type == GGML_TYPE_Q4_K || tensor->type == GGML_TYPE_Q5_K;
++        const char * cache_data = static_cast<const char *>(tensor->data);
++        const char * cache_base = static_cast<const char *>(hctx->rpc_mempool);
++        const char * cache_end = cache_base + static_cast<ptrdiff_t>(hctx->rpc_mempool_len);
++        if (cacheable_type && cache_data >= cache_base && cache_data < cache_end &&
++            offset == 0 && size == ggml_nbytes(tensor)) {
 +            struct TiledCacheState {
 +                std::mutex mutex;
 +                bool initialized = false;
@@ -82,9 +88,10 @@ index 89f2f2fb3..bb1c26549 100644
 +                        entry.ne[3] != static_cast<uint64_t>(tensor->ne[3])) {
 +                        continue;
 +                    }
++                    const uint64_t tile_bytes = tensor->type == GGML_TYPE_Q4_1 ? 640 : 576;
 +                    const uint64_t expected_size =
 +                        ((static_cast<uint64_t>(tensor->ne[0]) + 31) / 32) *
-+                        ((static_cast<uint64_t>(tensor->ne[1]) + 31) / 32) * 576 *
++                        ((static_cast<uint64_t>(tensor->ne[1]) + 31) / 32) * tile_bytes *
 +                        static_cast<uint64_t>(tensor->ne[2]) * static_cast<uint64_t>(tensor->ne[3]);
 +                    if (entry.size != expected_size || entry.offset > static_cast<uint64_t>(INT64_MAX)) break;
 +                    cache.file.clear();
@@ -102,7 +109,7 @@ index 89f2f2fb3..bb1c26549 100644
          const char * dp                     = (const char *)tensor->data;
          const char * base                   = (const char *)hctx->rpc_mempool;
          const char * end                    = base + (ptrdiff_t)hctx->rpc_mempool_len;
-@@ -6988,6 +7074,7 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
+@@ -6988,6 +7081,7 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
                  memcpy((char *)tensor->data + offset, data, size);
                  break;
          }

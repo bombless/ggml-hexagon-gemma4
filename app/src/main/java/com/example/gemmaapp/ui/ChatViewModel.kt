@@ -8,10 +8,12 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.gemmaapp.engine.GemmaEngine
 import com.example.gemmaapp.engine.NativeLlamaSession
+import com.example.gemmaapp.engine.NativeChatMessage
 import com.example.gemmaapp.engine.HexagonRuntimeAssets
 import com.example.gemmaapp.BuildConfig
 import java.io.File
 import com.example.gemmaapp.engine.Gemma4AudioFeatureExtractor
+import com.example.gemmaapp.engine.Gemma4AudioEncoder
 import com.example.gemmaapp.engine.JavaScriptToolRuntime
 import com.example.gemmaapp.engine.ToolCallParser
 import com.example.gemmaapp.engine.StreamingOutputStateMachine
@@ -64,6 +66,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private var engine: GemmaEngine? = null
     private var ggufSession: NativeLlamaSession? = null
+    private var ggufAudioEncoder: Gemma4AudioEncoder? = null
     private val _engineMode = MutableStateFlow("ONNX/QNN")
     val engineMode: StateFlow<String> = _engineMode.asStateFlow()
     private val javaScriptRuntime = JavaScriptToolRuntime()
@@ -164,6 +167,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             engineLifecycleMutex.withLock {
                 try {
+                    ggufAudioEncoder?.close()
+                    ggufAudioEncoder = null
                     ggufSession?.close()
                     ggufSession = null
                     _engineMode.value = "ONNX/QNN"
@@ -244,14 +249,25 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         return@withLock
                     }
                     ggufSession = openedSession
+                    val audioModelFile = GemmaEngine.findModelFiles(getApplication())?.audioModelFile
+                    ggufAudioEncoder = audioModelFile?.let { audioFile ->
+                        runCatching { Gemma4AudioEncoder(audioFile) }
+                            .onFailure { Log.w(TAG, "GGUF audio encoder initialization failed", it) }
+                            .getOrNull()
+                    }
                 }
                 if (_engineMode.value != "GGUF") return@withLock
                 _engineMode.value = "GGUF"
                 _isEngineReady.value = true
                 publishSystemStatus("GGUF 引擎已就绪：${model.name} · ${BuildConfig.GGML_HEXAGON_BACKEND}")
+                publishSystemStatus(if (ggufAudioEncoder != null) {
+                    "GGUF 语音输入已就绪：Gemma 4 音频编码器 → llama.cpp 音频嵌入解码"
+                } else {
+                    "GGUF 文字与 JavaScript 工具已就绪；未找到 ONNX 音频编码器，语音输入暂不可用。"
+                })
                 Log.i(TAG, "GGUF switch complete totalMs=${(System.nanoTime() - switchStartNanos) / 1_000_000}")
                 _messages.value = _messages.value + ChatMessage(sender = ChatMessage.Sender.SYSTEM,
-                    text = "已切换到 GGUF 引擎。语音输入和 JavaScript 工具目前仅由 ONNX/QNN 路径提供。")
+                    text = "已切换到 GGUF 引擎。JavaScript 工具调用已启用；语音输入直接使用 Gemma 4 音频编码器，并将音频嵌入送入 llama.cpp。")
             } catch (error: Throwable) {
                 Log.e(TAG, "GGUF engine initialization failed", error)
                 _engineMode.value = "ONNX/QNN"
@@ -271,10 +287,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun sendMessage(promptText: String, audioSamples: FloatArray? = null) {
         if ((promptText.isBlank() && audioSamples == null) || _isGenerating.value) return
         if (_engineMode.value == "GGUF") {
-            if (audioSamples != null) {
-                _messages.value = _messages.value + ChatMessage(sender = ChatMessage.Sender.SYSTEM,
-                    text = "当前 GGUF JNI 路径暂不支持音频输入，请切回 ONNX/QNN。")
-            } else sendGgufMessage(promptText.trim())
+            sendGgufMessage(promptText.trim(), audioSamples)
             return
         }
 
@@ -439,61 +452,169 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun sendGgufMessage(text: String) {
+    private fun sendGgufMessage(text: String, audioSamples: FloatArray? = null) {
         val session = ggufSession ?: run {
             _messages.value = _messages.value + ChatMessage(sender = ChatMessage.Sender.SYSTEM,
                 text = "GGUF 会话未初始化，请重新选择 GGUF 引擎。")
             return
         }
-        val history = _messages.value.filter { it.sender == ChatMessage.Sender.USER || it.sender == ChatMessage.Sender.MODEL }
-            .mapNotNull { message -> message.text.takeIf { it.isNotBlank() }?.let {
-                (if (message.sender == ChatMessage.Sender.USER) "User: " else "Assistant: ") + it
-            } }.joinToString("\n")
-        val prompt = if (history.isBlank()) text else "$history\nUser: $text\nAssistant:"
-        _messages.value = _messages.value + ChatMessage(sender = ChatMessage.Sender.USER, text = text) +
+        val audioTokenCount = audioSamples?.let {
+            Gemma4AudioFeatureExtractor.softTokenCountForSamples(it.size)
+        } ?: 0
+        if (audioSamples != null && audioTokenCount <= 0) {
+            _messages.value = _messages.value + ChatMessage(
+                sender = ChatMessage.Sender.SYSTEM, text = "录音太短，无法识别，请重新录制。"
+            )
+            return
+        }
+        if (audioSamples != null && ggufAudioEncoder == null) {
+            _messages.value = _messages.value + ChatMessage(
+                sender = ChatMessage.Sender.SYSTEM,
+                text = "GGUF 语音输入需要本地 audio_encoder_q4f16.onnx 和对应数据文件；请先完成 ONNX 模型下载。"
+            )
+            return
+        }
+        val modelInput = if (audioSamples != null) {
+            "Transcribe the following speech segment in Chinese into Chinese text.\n\n" +
+                "Follow these specific instructions for formatting the answer:\n" +
+                "* Only output the transcription, with no newlines.\n" +
+                "* When transcribing numbers, write the digits.\n\n" +
+                "<|audio>" + "<|audio|>".repeat(audioTokenCount) + "<audio|>"
+        } else text
+        val displayText = audioSamples?.let {
+            "🎤 语音输入（${String.format(java.util.Locale.US, "%.1f", it.size / 16000f)} 秒）"
+        } ?: text
+        val conversationMessages = mutableListOf(NativeChatMessage("system", toolSystemPrompt))
+        _messages.value.filter { it.sender == ChatMessage.Sender.USER || it.sender == ChatMessage.Sender.MODEL }
+            .filter { it.text.isNotBlank() }
+            .forEach { message ->
+                conversationMessages.add(NativeChatMessage(
+                    if (message.sender == ChatMessage.Sender.USER) "user" else "assistant",
+                    message.text
+                ))
+            }
+        conversationMessages.add(NativeChatMessage("user", modelInput))
+        _messages.value = _messages.value + ChatMessage(sender = ChatMessage.Sender.USER, text = displayText) +
             ChatMessage(sender = ChatMessage.Sender.MODEL, text = "")
         _isGenerating.value = true
         _generationSpeed.value = 0f
         _generatedTokens.value = 0
         viewModelScope.launch(Dispatchers.IO) {
-            // Keep GGUF presentation in sync with ONNX/QNN: raw llama.cpp pieces
-            // can contain Gemma channel markers and must not go straight to Markdown.
-            val streamParser = StreamingOutputStateMachine()
             val start = System.nanoTime()
             var tokenCount = 0
             var errorText: String? = null
+            val responseBuilder = StringBuilder()
+            val thinkingBuilder = StringBuilder()
+            val toolCallItems = mutableListOf<ToolCallInfo>()
+            var toolRounds = 0
             try {
-                session.generate(prompt, maxTokens = 768, listener = object : NativeLlamaSession.Listener {
-                    override fun onToken(text: String) {
-                        tokenCount++
-                        val elapsed = ((System.nanoTime() - start) / 1_000_000_000.0).coerceAtLeast(0.001)
-                        _generatedTokens.value = tokenCount
-                        _generationSpeed.value = (tokenCount / elapsed).toFloat()
-                        val snapshot = streamParser.append(text)
-                        updateLastMessage(
-                            newText = snapshot.visibleText,
-                            thinking = snapshot.thinkingText
-                        )
+                val audioEmbeddings = audioSamples?.let { samples ->
+                    ggufAudioEncoder?.encode(samples)
+                        ?: throw IllegalStateException("GGUF audio encoder is not initialized")
+                }
+                if (audioEmbeddings != null) {
+                    Log.i(TAG, "GGUF audio encoded rows=${audioEmbeddings.rows} dim=${audioEmbeddings.dimension}")
+                }
+                while (true) {
+                    // Keep Gemma control markers out of the visible answer while
+                    // retaining tool-call text for the structured parser below.
+                    val roundBuilder = StringBuilder()
+                    val streamParser = StreamingOutputStateMachine()
+                    var roundError: String? = null
+                    session.generate(
+                        conversationMessages,
+                        maxTokens = 768,
+                        audioEmbeddings = audioEmbeddings,
+                        listener = object : NativeLlamaSession.Listener {
+                            override fun onToken(text: String) {
+                                roundBuilder.append(text)
+                                tokenCount++
+                                val elapsed = ((System.nanoTime() - start) / 1_000_000_000.0).coerceAtLeast(0.001)
+                                _generatedTokens.value = tokenCount
+                                _generationSpeed.value = (tokenCount / elapsed).toFloat()
+                                val snapshot = streamParser.append(text)
+                                val liveTools = toolCallItems.toMutableList()
+                                snapshot.toolPreview?.let { preview ->
+                                    if (liveTools.lastOrNull()?.status == "运行中") {
+                                        liveTools[liveTools.lastIndex] = liveTools.last().copy(arguments = preview)
+                                    } else {
+                                        liveTools.add(ToolCallInfo("javascript", preview, status = "运行中"))
+                                    }
+                                }
+                                updateLastMessage(
+                                    newText = responseBuilder.toString() + snapshot.visibleText,
+                                    thinking = thinkingBuilder.toString() + snapshot.thinkingText,
+                                    toolCalls = liveTools
+                                )
+                            }
+
+                            override fun onComplete(status: String) {
+                                Log.i(TAG, "GGUF generation round=${toolRounds + 1} complete: $status")
+                            }
+
+                            override fun onError(message: String) { roundError = message }
+                        }
+                    )
+
+                    val roundText = roundBuilder.toString()
+                    val finalSnapshot = streamParser.finish()
+                    val toolCall = if (roundError == null) ToolCallParser.parse(roundText) else null
+                    if (roundError != null) {
+                        responseBuilder.append(finalSnapshot.visibleText)
+                        if (finalSnapshot.thinkingText.isNotBlank()) thinkingBuilder.append(finalSnapshot.thinkingText)
+                        errorText = roundError
+                        break
                     }
-                    override fun onComplete(status: String) { Log.i(TAG, "GGUF generation complete: $status") }
-                    override fun onError(message: String) { errorText = message }
-                })
+                    if (toolCall == null) {
+                        if (finalSnapshot.thinkingText.isNotBlank()) thinkingBuilder.append(finalSnapshot.thinkingText)
+                        responseBuilder.append(finalSnapshot.visibleText)
+                        break
+                    }
+                    if (toolRounds >= 3) {
+                        responseBuilder.append("\n[已达到 JavaScript 工具调用次数上限，本次未执行额外调用。]")
+                        break
+                    }
+
+                    toolRounds++
+                    val preamble = finalSnapshot.visibleText
+                    if (preamble.isNotBlank()) responseBuilder.append(preamble).append("\n\n")
+                    val roundThinking = finalSnapshot.thinkingText
+                    if (roundThinking.isNotBlank()) thinkingBuilder.append(roundThinking).append("\n\n")
+                    val toolIndex = toolCallItems.size
+                    toolCallItems.add(ToolCallInfo(
+                        "javascript", ToolCallParser.toolCallPreview(roundText).orEmpty(),
+                        toolCall.code, "运行中"
+                    ))
+                    updateLastMessage(responseBuilder.toString(), thinkingBuilder.toString(), toolCallItems.toList())
+                    Log.i(TAG, "GGUF JavaScript tool call round=$toolRounds codeChars=${toolCall.code.length}")
+                    val toolResult = javaScriptRuntime.execute(toolCall.code)
+                    Log.i(TAG, "GGUF JavaScript tool completed success=${toolResult.success} outputChars=${toolResult.output.length}")
+                    toolCallItems[toolIndex] = toolCallItems[toolIndex].copy(
+                        status = if (toolResult.success) "成功" else "失败",
+                        output = toolResult.output
+                    )
+                    updateLastMessage(responseBuilder.toString(), thinkingBuilder.toString(), toolCallItems.toList())
+                    conversationMessages.add(NativeChatMessage("assistant", roundText))
+                    conversationMessages.add(NativeChatMessage(
+                        "tool",
+                        "success: ${toolResult.success}\noutput:\n${toolResult.output.take(12_000)}",
+                        toolName = "javascript"
+                    ))
+                }
             } catch (error: Throwable) {
                 errorText = error.message ?: error.javaClass.simpleName
-                Log.e(TAG, "GGUF generation failed", error)
+                Log.e(TAG, "GGUF generation/tool loop failed", error)
             } finally {
                 val duration = ((System.nanoTime() - start) / 1_000_000L).coerceAtLeast(1L)
-                // Release any trailing partial control-token prefix as literal text.
-                val finalSnapshot = streamParser.finish()
-                val finalText = finalSnapshot.visibleText +
+                val finalText = responseBuilder.toString() +
                     (errorText?.let { "\n[GGUF 错误] $it" } ?: "")
                 finishLastMessage(
                     finalText,
                     duration,
                     tokenCount,
                     tokenCount * 1000f / duration,
-                    thinking = finalSnapshot.thinkingText,
-                    toolCalls = emptyList()
+                    thinking = thinkingBuilder.toString(),
+                    toolCalls = toolCallItems.toList()
                 )
                 _isGenerating.value = false
             }
@@ -547,6 +668,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        runCatching { ggufAudioEncoder?.close() }
+        ggufAudioEncoder = null
         engine?.close()
         ggufSession?.let { session ->
             session.cancel()

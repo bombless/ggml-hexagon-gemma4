@@ -1,5 +1,6 @@
 #include "gguf.h"
 #include "ggml.h"
+#include "ggml-quants.h"
 #include "htp-repack.h"
 #include "htp-tiled-cache.h"
 
@@ -40,15 +41,52 @@ static uint64_t source_signature(const std::string & path, uint64_t size) {
     return hash;
 }
 
-static uint64_t packed_q4_0_size(const ggml_tensor * t) {
+static uint64_t packed_tile_size(const ggml_tensor * t, uint64_t tile_bytes) {
     const uint64_t kt = (static_cast<uint64_t>(t->ne[0]) + 31) / 32;
     const uint64_t ct = (static_cast<uint64_t>(t->ne[1]) + 31) / 32;
     const uint64_t slices = static_cast<uint64_t>(t->ne[2]) * static_cast<uint64_t>(t->ne[3]);
     if (kt && ct > std::numeric_limits<uint64_t>::max() / kt) throw std::runtime_error("tensor packed size overflow");
     const uint64_t tiles = kt * ct;
-    if (tiles > std::numeric_limits<uint64_t>::max() / 576 / std::max<uint64_t>(slices, 1))
+    if (tiles > std::numeric_limits<uint64_t>::max() / tile_bytes / std::max<uint64_t>(slices, 1))
         throw std::runtime_error("tensor packed size overflow");
-    return tiles * 576 * slices;
+    return tiles * tile_bytes * slices;
+}
+
+template <typename BlockT, typename DequantizeFn>
+static void repack_kquant_as_q4_0_tiled(ggml_tensor * tensor, const void * source,
+                                        DequantizeFn dequantize, int64_t blocks_per_row) {
+    const int64_t ne0 = tensor->ne[0], ne1 = tensor->ne[1];
+    const int64_t ne2 = tensor->ne[2], ne3 = tensor->ne[3];
+    const int n_col_tiles = static_cast<int>((ne1 + 31) / 32);
+    const int n_k_tiles = static_cast<int>((ne0 + 31) / 32);
+    const size_t matrix_size = static_cast<size_t>(n_col_tiles) * n_k_tiles * 576;
+    const int64_t q4_blocks_per_row = ne0 / QK4_0;
+    std::vector<float> row_f32(static_cast<size_t>(ne0));
+    std::vector<block_q4_0> strip_q4(static_cast<size_t>(32 * q4_blocks_per_row));
+    const auto * src = static_cast<const BlockT *>(source);
+
+    for (int64_t i3 = 0; i3 < ne3; ++i3) {
+        for (int64_t i2 = 0; i2 < ne2; ++i2) {
+            const BlockT * src_slice = src + (i3 * ne2 + i2) * (ne1 * blocks_per_row);
+            auto * matrix_dst = static_cast<uint8_t *>(tensor->data) + (i3 * ne2 + i2) * matrix_size;
+            for (int ct = 0; ct < n_col_tiles; ++ct) {
+                for (int row = 0; row < 32; ++row) {
+                    const int64_t r = ct * 32 + row;
+                    if (r < ne1) {
+                        dequantize(src_slice + r * blocks_per_row, row_f32.data(), ne0);
+                        quantize_row_q4_0_ref(row_f32.data(), strip_q4.data() + row * q4_blocks_per_row, ne0);
+                    } else {
+                        std::memset(strip_q4.data() + row * q4_blocks_per_row, 0,
+                                    static_cast<size_t>(q4_blocks_per_row) * sizeof(block_q4_0));
+                    }
+                }
+                for (int kt = 0; kt < n_k_tiles; ++kt) {
+                    uint8_t * tile_dst = matrix_dst + (ct * n_k_tiles + kt) * 576;
+                    htp_repack_q4_0_tile_from_blocks(strip_q4.data(), tile_dst, ne0, ne1, ct, kt);
+                }
+            }
+        }
+    }
 }
 
 int main(int argc, char ** argv) {
@@ -79,14 +117,17 @@ int main(int argc, char ** argv) {
             auto & stats = type_stats[static_cast<int>(tensor->type)];
             stats.first++;
             stats.second += gguf_get_tensor_size(metadata, i);
-            if (tensor->type != GGML_TYPE_Q4_0 || !htp_is_tiled_weight_tensor(tensor)) continue;
+            const bool supported = tensor->type == GGML_TYPE_Q4_0 || tensor->type == GGML_TYPE_Q4_1 ||
+                                   tensor->type == GGML_TYPE_Q4_K || tensor->type == GGML_TYPE_Q5_K;
+            if (!supported || !htp_is_tiled_weight_tensor(tensor)) continue;
             if (std::strlen(name) >= htp_tiled_cache::NAME_CAPACITY)
                 throw std::runtime_error(std::string("tensor name too long for cache format: ") + name);
             htp_tiled_cache::Entry entry{};
             std::memcpy(entry.name, name, std::strlen(name));
             entry.type = static_cast<uint32_t>(tensor->type);
             for (int d = 0; d < 4; ++d) entry.ne[d] = static_cast<uint64_t>(tensor->ne[d]);
-            entry.size = packed_q4_0_size(tensor);
+            const uint64_t tile_bytes = tensor->type == GGML_TYPE_Q4_1 ? 640 : 576;
+            entry.size = packed_tile_size(tensor, tile_bytes);
             entries.push_back(entry);
         }
         for (const auto & item : type_stats) {
@@ -132,7 +173,15 @@ int main(int argc, char ** argv) {
             if (!input.read(reinterpret_cast<char *>(raw.data()), static_cast<std::streamsize>(raw.size())))
                 throw std::runtime_error(std::string("failed reading tensor ") + entry.name);
             tensor->data = packed.data();
-            htp_repack_tensor_tiled(tensor, raw.data(), raw.size());
+            if (tensor->type == GGML_TYPE_Q4_K) {
+                repack_kquant_as_q4_0_tiled<block_q4_K>(tensor, raw.data(),
+                    dequantize_row_q4_K, tensor->ne[0] / QK_K);
+            } else if (tensor->type == GGML_TYPE_Q5_K) {
+                repack_kquant_as_q4_0_tiled<block_q5_K>(tensor, raw.data(),
+                    dequantize_row_q5_K, tensor->ne[0] / QK_K);
+            } else {
+                htp_repack_tensor_tiled(tensor, raw.data(), raw.size());
+            }
             tensor->data = nullptr;
             out.seekp(static_cast<std::streamoff>(entry.offset));
             out.write(reinterpret_cast<const char *>(packed.data()), static_cast<std::streamsize>(packed.size()));
