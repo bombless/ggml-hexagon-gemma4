@@ -13,4 +13,5 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "gemma4-hexagon-android"
-include(":app")
+include(":app", ":shared-tools")
+project(":shared-tools").projectDir = file("shared-tools")

@@ -1,0 +1,4 @@
+[submodule "shared-tools"]
+	path = shared-tools
+	url = https://github.com/bombless/android-agent-tools.git
+	branch = main

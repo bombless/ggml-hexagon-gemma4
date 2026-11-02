@@ -134,8 +134,8 @@ if (ggmlHexagonSource != null && ggmlHexagonBackend != "cpu") {
 }
 
 dependencies {
-    // Sandboxed, pure-JVM JavaScript runtime for model-generated code and tests.
-    implementation("org.mozilla:rhino:1.7.15")
+    // Shared model-independent JavaScript sandbox; Gemma token adapters stay app-local.
+    implementation(project(":shared-tools"))
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.27.0")
     implementation("com.qualcomm.qti:onnxruntime-android-qnn:2.6.0")
     implementation("com.qualcomm.qti:qnn-runtime:2.50.0")

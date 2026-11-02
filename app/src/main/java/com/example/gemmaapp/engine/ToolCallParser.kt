@@ -1,5 +1,7 @@
 package com.example.gemmaapp.engine
 
+import com.bombless.agenttools.ToolCallParser as SharedToolCallParser
+
 data class JavaScriptToolCall(val code: String)
 
 /** Parser for the structured JavaScript tool call and Gemma reasoning channels. */
@@ -40,7 +42,7 @@ object ToolCallParser {
         val json = text.substring(jsonStart, end)
         val name = readJsonString(json, "name") ?: return null
         if (name != "javascript") return null
-        val code = readJsonString(json, "code") ?: return null
+        val code = SharedToolCallParser.extractCode(json).takeIf { it.isNotBlank() } ?: return null
         return if (code.isBlank()) null else JavaScriptToolCall(code)
     }
 

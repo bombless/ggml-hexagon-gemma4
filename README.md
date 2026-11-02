@@ -6,7 +6,8 @@ This repository combines a migrated Android chat application with reproducible A
 
 ## Repository layout
 
-- app/ — migrated Kotlin/Compose Android application and unit tests (currently QNN/ONNX Runtime).
+- app/ — migrated Kotlin/Compose Android application, Gemma 4 token-protocol adapters, and unit tests (currently QNN/ONNX Runtime).
+- shared-tools/ — pinned `android-agent-tools` Git submodule containing the model-independent Rhino JavaScript sandbox and generic tool-call extraction helpers; app-specific Gemma 4 token/channel parsing remains in `app/`.
 - native/ — JNI llama session source, optional Android CMake target, and integration design (`native/integration-design.md`).
 - scripts/ci-build-hexagon.sh and scripts/validate-hexagon-artifacts.py — pinned upstream Android-arm64 builds, isolated AP/HTP v75 bundles, and per-backend SHA-256 manifests.
 - .github/workflows/ — separate Hexagon artifact and Android APK CI workflows.
