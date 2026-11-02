@@ -10,6 +10,17 @@ Use JDK 17 and install Android SDK platform 35. The migrated Gradle configuratio
 
 The debug APK is written to app/build/outputs/apk/debug/app-debug.apk. The APK is an ONNX Runtime/QNN app build; it does not contain a ggml JNI integration or proprietary Hexagon SDK libraries.
 
+## Local Hexagon APK build (Windows)
+
+`scripts/build-android-hexagon-apks.ps1` builds both Hexagon transport APKs by default. Gradle/CMake/Ninja are incremental; the script deliberately preserves `app/.cxx` instead of deleting the native build cache.
+
+When iterating on Kotlin, build native outputs once and then package Kotlin changes without invoking the native build task. Run the two commands with the same backend:
+
+    .\scripts\build-android-hexagon-apks.ps1 -OnlyBackend fastrpc-mempool -BuildStage native
+    .\scripts\build-android-hexagon-apks.ps1 -OnlyBackend fastrpc-mempool -BuildStage kotlin
+
+Use `dspqueue` instead of `fastrpc-mempool` for the other transport. `-BuildStage native` and `-BuildStage kotlin` require an explicit `-OnlyBackend` because the two transports share generated APK/native output locations. `-BuildStage all` (the default) still builds and validates the APKs for both transports in one run.
+
 ## CI
 
 The Android app workflow builds the debug APK and runs JVM unit tests on a clean Ubuntu runner. The Hexagon Android artifacts workflow separately builds FastRPC+mempool and dspqueue from the pinned upstream source. Artifacts are separate by design.
