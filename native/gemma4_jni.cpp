@@ -174,6 +174,14 @@ Java_com_example_gemmaapp_engine_NativeLlamaSession_nativeCreate(
             if (deviceCount == 0) throw std::runtime_error("Hexagon backend registered but exposed no HTP devices; check DSP runtime, permissions, and matching v75 skeleton deployment");
             ggml_backend_dev_t device = ggml_backend_reg_dev_get(htp, 0);
             if (!device) throw std::runtime_error("Hexagon registry returned an invalid HTP device");
+            // Force lazy backend/context initialization here, while JNI can still
+            // translate failure into a Java exception. Do not let model loading
+            // discover a null device buffer type and abort inside ggml allocator.
+            if (ggml_backend_dev_buffer_type(device) == nullptr) {
+                throw std::runtime_error(
+                    "Hexagon backend initialization failed while creating its buffer type; "
+                    "see GGMLHEXAGON logcat diagnostics for the FastRPC/DSP failure stage");
+            }
             LOGE("Selecting ggml backend %s device %s (%s)", ggml_backend_reg_name(htp),
                  ggml_backend_dev_name(device), compiledBackend.c_str());
             selectedDevices = { device, nullptr };
