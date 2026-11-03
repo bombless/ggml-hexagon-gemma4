@@ -17,7 +17,8 @@ $AllowedCommits = @(
     "d70860568a59bf2cacf98e0679457f129b9d5b2a", # local runtime-directory patch on top of the pinned base
     "f1c102e9e2a2898408cbc0bff006dc01b913a396", # app-private runtime + DSP cache diagnostic config
     "8ff434f6e4d253fbcd5c73901943b53b4e968be7", # FastRPC Q4_0 tiled cache loading
-    "acdb1e4eb8506ad63f1c78f8edc4f74c7ef31d10" # extend tiled cache loading to more quant types
+    "acdb1e4eb8506ad63f1c78f8edc4f74c7ef31d10", # extend tiled cache loading to more quant types
+    "e08076a4d319f0c8b495dbd160ddf8c407314dc8" # local guarded backend-initialization failure handling
 )
 $ActualCommit = (& git -C $Upstream rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $ActualCommit -notin $AllowedCommits) {
